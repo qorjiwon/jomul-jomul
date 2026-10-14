@@ -29,7 +29,8 @@ button { cursor: pointer; border: 0; background: none; }
 
 /* ---------- 위쪽 바 ---------- */
 .topbar { position: fixed; inset: 0 0 auto 0; height: 64px; display: flex; align-items: center; gap: 18px; padding: 0 20px; background: rgba(255, 255, 255, 0.9); backdrop-filter: blur(14px); border-bottom: 1px solid var(--line); z-index: 20; }
-.brand { display: flex; align-items: center; gap: 8px; min-width: 240px; color: var(--brand); }
+.brand { display: flex; align-items: center; gap: 8px; min-width: 240px; color: var(--brand); text-decoration: none; cursor: pointer; }
+.brand:hover .brand-name { opacity: .8; }
 .brand-mark { width: 30px; height: 30px; display: block; }
 .brand-name { font-size: 22px; font-weight: 800; letter-spacing: -0.03em; }
 .brand-sub { font-size: 13px; font-weight: 500; color: var(--muted); margin-left: 2px; }
@@ -143,14 +144,23 @@ button { cursor: pointer; border: 0; background: none; }
 .pick-card { width: min(880px, 100%); text-align: center; }
 .pick-card h1 { font-size: clamp(30px, 4.6vw, 46px); font-weight: 800; letter-spacing: -0.04em; line-height: 1.2; margin: 0 0 28px; color: var(--text); }
 .pick-card p { margin: 0 0 26px; color: var(--sub); }
-.base-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr)); gap: 10px; }
-.base { background: var(--card); border: 1.5px solid var(--line-strong); border-radius: 22px; padding: 14px 10px 13px; display: flex; flex-direction: column; align-items: center; gap: 4px; transition: transform .18s cubic-bezier(.3,0,.2,1), border-color .18s, box-shadow .18s; }
-.base .emoji { width: 52px; height: 52px; display: grid; place-items: center; border-radius: 16px; background: var(--surface-2); font-size: 28px; line-height: 1; margin-bottom: 6px; transition: transform .2s cubic-bezier(.3,0,.2,1); }
-.base b { font-size: 15px; font-weight: 800; color: var(--text); }
-.base span:not(.emoji) { font-size: 11.5px; line-height: 1.4; color: var(--sub); }
-.base:hover { transform: translateY(-3px); border-color: var(--text); box-shadow: 0 18px 34px -22px rgba(39, 25, 60, .45); }
-.base:hover .emoji { transform: rotate(-6deg) scale(1.06); }
-.base:active { transform: scale(.97); }
+.base-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 18px 14px; text-align: left; }
+.base { background: none; border: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; text-align: left; }
+.base .thumb { position: relative; aspect-ratio: 1; border-radius: 24px; background: linear-gradient(180deg, #f6f6f8, #ececf0); display: grid; place-items: center; overflow: hidden; margin-bottom: 10px; transition: box-shadow .2s, transform .18s cubic-bezier(.3,0,.2,1); }
+.base .thumb::after { content: ''; position: absolute; left: 26%; right: 26%; bottom: 12%; height: 10px; border-radius: 50%; background: rgba(39, 25, 60, .13); filter: blur(4px); }
+.base .thumb img { position: relative; z-index: 1; width: 92%; height: 92%; object-fit: contain; transition: transform .45s cubic-bezier(.3,0,.2,1); }
+.base b { font-size: 16.5px; font-weight: 800; color: var(--text); padding: 0 4px; }
+.base > span { font-size: 13px; line-height: 1.4; color: var(--sub); padding: 0 4px; }
+.base:hover .thumb { box-shadow: inset 0 0 0 2px var(--text); }
+.base:hover .thumb img { transform: translateY(-6px) rotate(-8deg) scale(1.04); }
+.base:active .thumb { transform: scale(.97); }
+.base.import .thumb { background: var(--card) radial-gradient(var(--line-strong) 1px, transparent 1px) 0 0 / 14px 14px; box-shadow: inset 0 0 0 2px var(--line-strong); }
+.base.import .thumb::after { display: none; }
+.base.import:hover .thumb { box-shadow: inset 0 0 0 2px var(--text); }
+.base.import .ic { width: 84px; height: 84px; border-radius: 26px; background: var(--brand); color: var(--on-brand); display: grid; place-items: center; box-shadow: 0 14px 26px -14px rgba(39, 25, 60, .7); transition: transform .3s cubic-bezier(.3,0,.2,1); }
+.base.import .ic svg { width: 42px; height: 42px; }
+.base.import:hover .ic { transform: translateY(-4px) rotate(-6deg); }
+.base.import em { position: absolute; bottom: 18px; font-style: normal; font-size: 12px; font-weight: 700; color: var(--sub); }
 .pick-foot { margin-top: 24px; display: flex; gap: 12px; justify-content: center; align-items: center; flex-wrap: wrap; font-size: 13.5px; font-weight: 600; }
 
 /* AI 첫 반죽 */
@@ -201,7 +211,6 @@ button { cursor: pointer; border: 0; background: none; }
 .bgwork.grabbed img { filter: drop-shadow(0 22px 20px rgba(39, 25, 60, .26)); }
 @keyframes drift { from { translate: 0 0; } to { translate: var(--dx, 6px) var(--dy, -14px); } }
 @media (prefers-reduced-motion: reduce) { .bgwork { animation: none; } }
-.base.import .emoji { filter: none; }
 .dropzone { position: absolute; inset: 12px; z-index: 50; border: 2px dashed var(--brand); border-radius: 28px; background: rgba(255, 255, 255, .9); display: grid; place-items: center; font-size: 22px; font-weight: 800; color: var(--brand); pointer-events: none; }
 
 .pick-foot select { margin-left: 8px; height: 38px; padding: 0 12px; border-radius: 999px; border: 0; background: var(--surface-2); font-weight: 600; cursor: pointer; }
@@ -228,11 +237,6 @@ button { cursor: pointer; border: 0; background: none; }
 .icon:hover { background: var(--surface-2); color: var(--text); }
 .modal { position: absolute; inset: 0; background: rgba(20, 16, 30, .32); display: grid; place-items: center; z-index: 30; }
 .modal-card { width: min(780px, 92%); background: var(--card); border-radius: 28px; box-shadow: 0 30px 80px -30px rgba(20, 16, 30, .45); padding-bottom: 22px; }
-.help-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; padding: 0 20px; font-size: 13px; }
-.help-grid > div { background: var(--surface-2); border-radius: 20px; padding: 16px 16px 18px; }
-.help-grid h3 { margin: 0 0 10px; font-size: 15px; font-weight: 800; }
-.help-grid ul { margin: 0; padding-left: 16px; display: flex; flex-direction: column; gap: 7px; color: var(--sub); line-height: 1.45; }
-.help-grid li b { color: var(--text); font-weight: 700; }
 
 .toast { position: absolute; top: 18px; left: 50%; transform: translateX(-50%); background: var(--text); color: #fff; padding: 11px 18px; border-radius: 999px; font-size: 13.5px; font-weight: 600; z-index: 40; box-shadow: 0 12px 28px rgba(20, 16, 30, .2); animation: pop .2s ease-out; }
 @keyframes pop { from { transform: translate(-50%, -8px); opacity: 0; } }

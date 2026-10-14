@@ -266,7 +266,7 @@ function go(next: Step) {
   step = next;
   setStep(next === 'view' ? 'done' : next);
   for (const [k, d] of Object.entries(docks)) for (const r of d.roots) r.hidden = k !== next;
-  $('btn-help').hidden = next !== 'pick';
+  $('stepper').hidden = next === 'pick';
   $('pick-overlay').hidden = next !== 'pick';
   $('bake-overlay').hidden = next !== 'bake';
   studio.controls.autoRotate = (next === 'done' || next === 'view') && turntable.checked;
@@ -396,13 +396,23 @@ function unbake() {
   const grid = $('base-grid');
   for (const b of BASES) {
     const card = el('button', 'base');
-    card.append(el('span', 'emoji', b.emoji), el('b', '', b.name), el('span', '', b.desc));
+    const stage = el('div', 'thumb');
+    const img = el('img');
+    img.src = `/bases/${b.id}.webp`;
+    img.alt = '';
+    stage.append(img);
+    card.append(stage, el('b', '', b.name), el('span', '', b.desc));
     card.addEventListener('click', () => void startPiece(b.id));
     grid.append(card);
   }
   const glbInput = $('glb-input') as HTMLInputElement;
   const imp = el('button', 'base import');
-  imp.append(el('span', 'emoji', '📂'), el('b', '', 'GLB 불러오기'), el('span', '', '내 3D 모형을 가져와 이어 빚기'));
+  const impStage = el('div', 'thumb');
+  impStage.append(
+    el('div', 'ic', '<svg viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M24 7 38 15v16l-14 8-14-8V15Z"/><path d="M10 15l14 8 14-8M24 23v16"/></svg>'),
+    el('em', '', '.glb 끌어다 놓기'),
+  );
+  imp.append(impStage, el('b', '', 'GLB 불러오기'), el('span', '', '내 3D 모형을 가져와 이어 빚기'));
   imp.addEventListener('click', () => glbInput.click());
   glbInput.addEventListener('change', () => { const f = glbInput.files?.[0]; glbInput.value = ''; if (f) void startGlb(f); });
   grid.append(imp);
@@ -1017,9 +1027,15 @@ async function mountMesh(meta: { id: string; name: string; baseId: string; creat
   glazeToggle.set(meta.glossy);
 }
 
-$('btn-help').addEventListener('click', () => { $('help').hidden = false; });
-$('help-close').addEventListener('click', () => { $('help').hidden = true; });
-$('help').addEventListener('click', (e) => { if (e.target === e.currentTarget) $('help').hidden = true; });
+// The logo always leads back to the first screen; unsaved clay on the wheel asks first.
+$('brand').addEventListener('click', (e) => {
+  e.preventDefault();
+  if (step === 'pick') return;
+  const working = step === 'sculpt' || step === 'bake' || step === 'paint';
+  if (working && !confirm('첫 화면으로 갈까요? 저장하지 않은 작품은 사라져요.')) return;
+  disposePiece();
+  go('pick');
+});
 
 // ---------------------------------------------------------------- history
 function refreshHistoryButtons() {
@@ -1118,7 +1134,6 @@ window.addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
   if (meta && k === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
   if (meta && k === 'y') { e.preventDefault(); redo(); return; }
-  if (e.key === 'Escape') { $('help').hidden = true; return; }
   if (step === 'sculpt') {
     if (e.key === '[') sculptSliders.rad.set(sculptSettings.radius - 0.03);
     else if (e.key === ']') sculptSliders.rad.set(sculptSettings.radius + 0.03);
