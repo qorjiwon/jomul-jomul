@@ -4,7 +4,7 @@ import http from 'node:http';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import express, { type NextFunction, type Request, type Response } from 'express';
-import { createStore, seedFeatured } from './store';
+import { createStore } from './store';
 import { aiEnabled, editShape, generateShape, parseImage } from './ai';
 
 const prod = process.env.NODE_ENV === 'production';
@@ -12,7 +12,6 @@ const port = Number(process.env.PORT ?? 5173);
 const host = process.env.HOST ?? (prod || process.env.REPL_ID ? '0.0.0.0' : '127.0.0.1');
 
 const store = createStore();
-seedFeatured(store).catch((e) => console.error('[jomul] seeding failed:', e));
 const app = express();
 const server = http.createServer(app);
 app.disable('x-powered-by');

@@ -1,5 +1,4 @@
 // Public gallery storage: Postgres when DATABASE_URL is set (Replit), otherwise local files (dev).
-import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import pg from 'pg';
@@ -144,27 +143,3 @@ export function createStore(): Store {
   return new FileStore(path.resolve('data/works'));
 }
 
-/**
- * Inserts the bundled featured works (server/seed/<id>.{json,webp|png|jpg,bin}) that aren't in the store yet,
- * or refreshes them when the bundled copy is newer. Nobody holds their token.
- */
-export async function seedFeatured(store: Store, dir = path.resolve('server/seed')) {
-  let files: string[] = [];
-  try { files = await fs.readdir(dir); } catch { return; }
-  for (const f of files.filter((n) => n.endsWith('.json'))) {
-    const id = f.slice(0, -5);
-    const meta = JSON.parse(await fs.readFile(path.join(dir, f), 'utf8')) as WorkMeta;
-    const stored = await store.updatedAt(id);
-    if (stored !== null && stored >= meta.updatedAt) continue;
-    const thumbFile = ['webp', 'png', 'jpg'].map((e) => `${id}.${e}`).find((n) => files.includes(n));
-    if (!thumbFile) continue;
-    await store.upsert({
-      ...meta,
-      id,
-      tokenHash: (await store.tokenHash(id)) ?? crypto.randomBytes(32).toString('hex'),
-      thumb: await fs.readFile(path.join(dir, thumbFile)),
-      mesh: await fs.readFile(path.join(dir, `${id}.bin`)),
-    });
-    console.log(`[jomul] seeded featured work "${meta.name}"`);
-  }
-}
