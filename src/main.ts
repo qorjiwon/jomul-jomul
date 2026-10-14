@@ -6,11 +6,11 @@ import { buildClayMesh, buildAdjacency, type Adjacency } from './mesher';
 import { Sculptor, SCULPT_TOOLS, type SculptTool, type Hit } from './sculpt';
 import { Painter, PAINT_TOOLS, PALETTE, type PaintTool } from './paint';
 import { runBake, makeClayMaterial, applyFiredLook, applyClayLook, loadTexture, FIRED_COLOR } from './bake';
-import { listWorks, saveWork, deleteWork, newId, type Work } from './storage';
+import { newId } from './storage';
 import { importGLB, makeSculptable, seamlessNormals } from './importer';
-import { askAiShape, fetchConfig, getAuthor, listPublic, loadPublicMesh, publish, setAuthor, thumbUrl, unpublish, type MeshData, type PublicWork } from './cloud';
+import { askAiShape, fetchConfig, getAuthor, listPublic, loadPublicMesh, publish, setAuthor, thumbUrl, type MeshData, type PublicWork } from './cloud';
 import { exportGLB, exportPNG } from './exporter';
-import { $, el, section, button, slider, toggle, toolGrid, toast, setStep, setHint, fmtDate } from './ui';
+import { $, el, section, button, slider, toggle, toolGrid, toast, setStep, setHint } from './ui';
 
 type Step = 'pick' | 'view' | 'sculpt' | 'bake' | 'paint' | 'done';
 type ClayMeshObj = THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
@@ -161,17 +161,71 @@ function panelHead(titleHtml: string, ...hist: HTMLElement[]) {
 }
 
 // ---------------------------------------------------------------- steps
-const panels: Record<string, HTMLElement> = {
-  view: $('panel-view'),
-  sculpt: $('panel-sculpt'),
-  paint: $('panel-paint'),
-  done: $('panel-done'),
-};
+// Each working step gets a left and a right tool panel (both foldable) plus a bottom action bar
+// for moving between steps and saving.
+type Side = 'left' | 'right';
+interface Dock { left: HTMLElement; right: HTMLElement; bar: HTMLElement; roots: HTMLElement[] }
+const dockOpen: Record<Side, boolean> = { left: true, right: true };
+
+function makeDock(): Dock {
+  const roots: HTMLElement[] = [];
+  const side = (s: Side) => {
+    const wrap = el('div', `dock ${s}`);
+    const panel = el('aside', 'panel');
+    const tab = el('button', 'dock-tab');
+    tab.type = 'button';
+    tab.addEventListener('click', () => setDockOpen(s, !dockOpen[s]));
+    wrap.append(panel, tab);
+    roots.push(wrap);
+    return panel;
+  };
+  const left = side('left'), right = side('right');
+  const bar = el('div', 'actionbar');
+  roots.push(bar);
+  for (const r of roots) r.hidden = true;
+  $('stage').append(...roots);
+  return { left, right, bar, roots };
+}
+
+function setDockOpen(s: Side, open: boolean) {
+  dockOpen[s] = open;
+  document.querySelectorAll<HTMLElement>(`.dock.${s}`).forEach((d) => {
+    d.classList.toggle('closed', !open);
+    const tab = d.querySelector<HTMLElement>('.dock-tab')!;
+    tab.textContent = (s === 'left') === open ? '‹' : '›';
+    tab.title = open ? '패널 접기' : '패널 펼치기';
+  });
+}
+
+const docks: Partial<Record<Step, Dock>> = { view: makeDock(), sculpt: makeDock(), paint: makeDock(), done: makeDock() };
+setDockOpen('left', true);
+setDockOpen('right', true);
+
+/** Bottom bar: back on the left, save and/or next on the right. */
+function fillBar(d: Dock, back: HTMLButtonElement, ...forward: HTMLButtonElement[]) {
+  const right = el('div', 'actionbar-forward');
+  right.append(...forward);
+  d.bar.append(back, right);
+}
+
+const saveBtns: HTMLButtonElement[] = [];
+function saveButton(label = '💾 저장', cls = 'save') {
+  const b = button(label, cls, () => void save());
+  saveBtns.push(b);
+  return b;
+}
+function downloadGLB() {
+  if (piece) void exportGLB(piece.mesh, pieceName(), studio.renderer).then(() => toast('GLB 파일을 내려받았어요')).catch(() => toast('내려받기에 실패했어요'));
+}
+function savePhoto() {
+  if (piece) void exportPNG(studio.renderer, studio.scene, studio.camera, pieceName()).then(() => toast('사진을 저장했어요'));
+}
 
 function go(next: Step) {
   step = next;
   setStep(next === 'view' ? 'done' : next);
-  for (const [k, p] of Object.entries(panels)) p.hidden = k !== next;
+  for (const [k, d] of Object.entries(docks)) for (const r of d.roots) r.hidden = k !== next;
+  $('btn-help').hidden = next !== 'pick';
   $('pick-overlay').hidden = next !== 'pick';
   $('bake-overlay').hidden = next !== 'bake';
   studio.controls.autoRotate = (next === 'done' || next === 'view') && turntable.checked;
@@ -367,7 +421,7 @@ async function startGlb(file: File) {
   });
 }
 
-// ---------------------------------------------------------------- 모두의 작품: random floaters behind the landing card
+// ---------------------------------------------------------------- 모두의 작품: saved works standing in a circle below the landing card
 const BG_MAX = 15;
 let bgWorks: PublicWork[] = [];
 
@@ -383,32 +437,32 @@ async function refreshBgWorks() {
   layoutBgWorks();
 }
 
-/** Scatter the floaters at random, preferring the margins beside the card and avoiding each other. */
+/** Stand the saved works in a circle below the card, like friends around a table. */
 function layoutBgWorks() {
   const layer = $('bg-works');
   const overlay = $('pick-overlay');
   layer.innerHTML = '';
   if (overlay.hidden || bgWorks.length === 0) return;
-  const W = overlay.clientWidth, H = Math.max(overlay.scrollHeight, overlay.clientHeight);
-  layer.style.height = `${H}px`;
+  const n = bgWorks.length;
+  const W = overlay.clientWidth;
   const o = overlay.getBoundingClientRect(), c = document.querySelector('.pick-card')!.getBoundingClientRect();
-  const card = { x: c.left - o.left - 16, y: c.top - o.top + overlay.scrollTop - 16, w: c.width + 32, h: c.height + 32 };
-  const placed: { x: number; y: number; s: number }[] = [];
-  const hits = (x: number, y: number, s: number, r: { x: number; y: number; w: number; h: number }) =>
-    x < r.x + r.w && x + s > r.x && y < r.y + r.h && y + s > r.y;
-  for (const w of bgWorks) {
-    const s = Math.round((W < 760 ? 64 : 92) + Math.random() * (W < 760 ? 28 : 56));
-    let best: { x: number; y: number } | null = null;
-    for (let tries = 0; tries < 80 && !best; tries++) {
-      const x = Math.random() * Math.max(1, W - s), y = Math.random() * Math.max(1, H - s);
-      if (placed.some((p) => hits(x, y, s, { x: p.x - 10, y: p.y - 10, w: p.s + 20, h: p.s + 20 }))) continue;
-      if (tries < 60 && hits(x, y, s, card)) continue; // after 60 misses, allow tucking behind the card
-      best = { x, y };
-    }
-    if (!best) continue;
-    placed.push({ ...best, s });
-    layer.append(makeFloater(w, best.x, best.y, s));
+  const top = c.bottom - o.top + overlay.scrollTop + 56;
+  // Big enough that neighbours don't touch, but never wider than the page; shrink the works if it would be.
+  let s = 204;
+  const maxR = (W - s) / 2 - 24;
+  let r = n === 1 ? 0 : Math.max(170, (n * s * 1.08) / (2 * Math.PI));
+  if (r > maxR) { s = Math.max(96, Math.floor((maxR * 2 * Math.PI) / (n * 1.08))); r = (W - s) / 2 - 24; }
+  const cx = W / 2, cy = top + r + s / 2;
+  layer.style.height = `${cy + r + s / 2 + 64}px`;
+  if (n > 1) {
+    const label = el('div', 'bgring-label', `모두의 작품<b>${n}</b>`);
+    label.style.cssText = `left:${cx}px;top:${cy}px`;
+    layer.append(label);
   }
+  bgWorks.forEach((w, i) => {
+    const a = -Math.PI / 2 + (i / n) * Math.PI * 2;
+    layer.append(makeFloater(w, cx + Math.cos(a) * r - s / 2, cy + Math.sin(a) * r - s / 2, s));
+  });
 }
 
 /** A saved work standing loose on the landing page: grab it to move it around, click it to open it. */
@@ -563,20 +617,19 @@ function openView(name: string, by: string) {
     fixItem('🖐', '이어서 빚기', '당기고 누르며 모양을 다듬어요', () => go('sculpt'));
     fixItem('🔥', '가마에 굽기', '구워서 색칠할 수 있게 만들어요', () => void startBake());
   }
-  fixItem('🏷', '이름 바꾸고 저장', '내 작품으로 저장하거나 모두에게 공개해요', () => go('done'));
+  fixItem('🏷', '이름 바꾸고 저장', '저장하면 첫 화면에 모두의 작품으로 올라가요', () => go('done'));
   setFixOpen(false);
   go('view');
 }
 {
-  const p = panels.view;
-  p.append(viewTitle, fixBtn, fixList);
+  const d = docks.view!;
+  d.left.append(viewTitle, fixBtn, fixList);
+  const s = section('내려받기');
   const row = el('div', 'row');
-  row.append(
-    button('⬇ GLB', '', () => { if (piece) void exportGLB(piece.mesh, pieceName(), studio.renderer).then(() => toast('GLB 파일을 내려받았어요')).catch(() => toast('내려받기에 실패했어요')); }),
-    button('📷 사진', '', () => { if (piece) void exportPNG(studio.renderer, studio.scene, studio.camera, pieceName()).then(() => toast('사진을 저장했어요')); }),
-  );
-  p.append(row, el('div', 'spacer'));
-  p.append(button('← 첫 화면으로', '', () => { disposePiece(); go('pick'); }));
+  row.append(button('⬇ GLB', '', downloadGLB), button('📷 사진', '', savePhoto));
+  s.append(row);
+  d.right.append(el('h2', '', '감상<small>드래그해서 이리저리 돌려 보세요.</small>'), s);
+  fillBar(d, button('← 첫 화면으로', 'back', () => { disposePiece(); go('pick'); }));
 }
 
 // ---------------------------------------------------------------- sculpt panel
@@ -587,31 +640,32 @@ const sculptUndo = button('↶', 'hist-btn', () => undo());
 const sculptRedo = button('↷', 'hist-btn', () => redo());
 sculptUndo.title = '되돌리기 (⌘Z)'; sculptRedo.title = '다시 실행 (⇧⌘Z)';
 {
-  const p = panels.sculpt;
-  p.append(panelHead('빚기<small>찰흙 위를 드래그하면 모양이 바뀌어요.</small>', sculptUndo, sculptRedo));
+  const d = docks.sculpt!;
+  d.left.append(panelHead('빚기<small>찰흙 위를 드래그하면 모양이 바뀌어요.</small>', sculptUndo, sculptRedo));
 
   const tools = toolGrid(SCULPT_TOOLS, (id) => { sculptSettings.tool = id; applySculptSettings(); hintForSculpt(); });
   tools.setActive(sculptSettings.tool);
-  const s1 = section('도구'); s1.append(tools.root); p.append(s1);
+  tools.root.querySelectorAll('.tool').forEach((b, i) => b.setAttribute('title', SCULPT_TOOLS[i].hint));
+  const s1 = section('도구'); s1.append(tools.root); d.left.append(s1);
+  sculptToolGrid = tools;
+
+  const sym = toggle('좌우 대칭으로 빚기 (M)', true, (v) => { sculptSettings.symmetry = v; applySculptSettings(); });
+  symToggle = sym;
+  d.left.append(sym.root);
 
   const s2 = section();
   const rad = slider({ label: '붓 크기', min: 0.05, max: 0.7, step: 0.01, value: sculptSettings.radius, onInput: (v) => { sculptSettings.radius = v; applySculptSettings(); } });
   const str = slider({ label: '세기', min: 0.05, max: 1, step: 0.01, value: sculptSettings.strength, onInput: (v) => { sculptSettings.strength = v; applySculptSettings(); } });
   s2.append(rad.root, str.root);
-  p.append(s2);
   sculptSliders = { rad, str };
+  d.right.append(el('h2', '', '붓 설정<small>[ ] 붓 크기 · - = 세기</small>'), s2);
+  d.right.append(button('처음 모양으로 되돌리기', '', () => { if (piece && confirm('빚은 내용을 모두 지우고 처음 반죽으로 돌아갈까요?')) { piece.sculptor.resetToOriginal(); refreshHistoryButtons(); } }));
 
-  const sym = toggle('좌우 대칭으로 빚기 (M)', true, (v) => { sculptSettings.symmetry = v; applySculptSettings(); });
-  symToggle = sym;
-  p.append(sym.root);
-
-  p.append(button('처음 모양으로 되돌리기', '', () => { if (piece && confirm('빚은 내용을 모두 지우고 처음 반죽으로 돌아갈까요?')) { piece.sculptor.resetToOriginal(); refreshHistoryButtons(); } }));
-
-  p.append(el('div', 'spacer'));
-  p.append(button('🔥 가마에 굽기', 'primary', () => void startBake()));
-  p.append(button('← 다른 반죽 고르기', '', () => { if (!piece || confirm('지금 빚은 반죽을 버리고 새로 고를까요? (저장하지 않으면 사라져요)')) { disposePiece(); go('pick'); } }));
-  tools.root.querySelectorAll('.tool').forEach((b, i) => b.setAttribute('title', SCULPT_TOOLS[i].hint));
-  sculptToolGrid = tools;
+  fillBar(d,
+    button('← 다른 반죽 고르기', 'back', () => { if (!piece || confirm('지금 빚은 반죽을 버리고 새로 고를까요? (저장하지 않으면 사라져요)')) { disposePiece(); go('pick'); } }),
+    saveButton(),
+    button('🔥 가마에 굽기', 'primary', () => void startBake()),
+  );
 }
 
 // ---------------------------------------------------------------- paint panel
@@ -634,8 +688,23 @@ function setPaintColor(hex: string) {
 }
 
 {
-  const p = panels.paint;
-  p.append(panelHead('색칠<small>잘 구워진 작품에 색을 입혀요.</small>', paintUndo, paintRedo));
+  const d = docks.paint!;
+  d.left.append(panelHead('색칠<small>잘 구워진 작품에 색을 입혀요.</small>', paintUndo, paintRedo));
+
+  const tools = toolGrid(PAINT_TOOLS, (id) => { paintSettings.tool = id; applyPaintSettings(); hintForPaint(); });
+  tools.setActive(paintSettings.tool);
+  tools.root.style.gridTemplateColumns = 'repeat(4, 1fr)';
+  tools.root.querySelectorAll('.tool').forEach((b, i) => b.setAttribute('title', PAINT_TOOLS[i].hint));
+  const s2 = section('도구'); s2.append(tools.root); d.left.append(s2);
+  paintToolGrid = tools;
+
+  const s3 = section('붓');
+  const rad = slider({ label: '붓 크기', min: 0.03, max: 0.6, step: 0.01, value: paintSettings.radius, onInput: (v) => { paintSettings.radius = v; applyPaintSettings(); } });
+  const op = slider({ label: '진하기', min: 0.05, max: 1, step: 0.01, value: paintSettings.opacity, onInput: (v) => { paintSettings.opacity = v; applyPaintSettings(); } });
+  const hard = slider({ label: '경계 또렷함', min: 0, max: 0.95, step: 0.01, value: paintSettings.hardness, onInput: (v) => { paintSettings.hardness = v; applyPaintSettings(); } });
+  s3.append(rad.root, op.root, hard.root);
+  d.left.append(s3);
+  paintSliders = { rad, op };
 
   const s1 = section('색');
   const pal = el('div', 'palette');
@@ -653,29 +722,16 @@ function setPaintColor(hex: string) {
   colorInput.addEventListener('input', () => setPaintColor(colorInput.value));
   cp.append(colorInput, el('span', '', '직접 고르기'), colorCode);
   s1.append(pal, cp);
-  p.append(s1);
-
-  const tools = toolGrid(PAINT_TOOLS, (id) => { paintSettings.tool = id; applyPaintSettings(); hintForPaint(); });
-  tools.setActive(paintSettings.tool);
-  tools.root.style.gridTemplateColumns = 'repeat(4, 1fr)';
-  tools.root.querySelectorAll('.tool').forEach((b, i) => b.setAttribute('title', PAINT_TOOLS[i].hint));
-  const s2 = section('도구'); s2.append(tools.root); p.append(s2);
-  paintToolGrid = tools;
-
-  const s3 = section();
-  const rad = slider({ label: '붓 크기', min: 0.03, max: 0.6, step: 0.01, value: paintSettings.radius, onInput: (v) => { paintSettings.radius = v; applyPaintSettings(); } });
-  const op = slider({ label: '진하기', min: 0.05, max: 1, step: 0.01, value: paintSettings.opacity, onInput: (v) => { paintSettings.opacity = v; applyPaintSettings(); } });
-  const hard = slider({ label: '경계 또렷함', min: 0, max: 0.95, step: 0.01, value: paintSettings.hardness, onInput: (v) => { paintSettings.hardness = v; applyPaintSettings(); } });
-  s3.append(rad.root, op.root, hard.root);
-  p.append(s3);
-  paintSliders = { rad, op };
+  d.right.append(el('h2', '', '물감<small>고른 색으로 칠해요.</small>'), s1);
 
   glazeToggle = toggle('✨ 유약 광택', false, (v) => { if (piece?.baked) { piece.glossy = v; applyFiredLook(piece.mesh.material, v); } });
-  p.append(glazeToggle.root);
+  d.right.append(glazeToggle.root);
 
-  p.append(el('div', 'spacer'));
-  p.append(button('✨ 완성하기', 'primary', () => go('done')));
-  p.append(button('← 다시 빚기 (색 지워짐)', '', unbake));
+  fillBar(d,
+    button('← 다시 빚기 (색 지워짐)', 'back', unbake),
+    saveButton(),
+    button('✨ 완성하기', 'primary', () => go('done')),
+  );
   setPaintColor(paintSettings.color);
 }
 
@@ -683,43 +739,33 @@ function setPaintColor(hex: string) {
 const nameInput = el('input', 'text') as HTMLInputElement;
 const authorInput = el('input', 'text') as HTMLInputElement;
 let turntable: ReturnType<typeof toggle>;
-let publicToggle: ReturnType<typeof toggle>;
-let saveBtn: HTMLButtonElement;
 {
-  const p = panels.done;
-  p.append(el('h2', '', '완성!<small>이름을 지어 주고 저장하거나 내려받아요.</small>'));
+  const d = docks.done!;
+  d.left.append(el('h2', '', '완성!<small>이름을 지어 주고 저장해요.</small>'));
   const s1 = section('작품 이름');
   nameInput.placeholder = '예) 하품하는 고양이';
   nameInput.maxLength = 30;
   s1.append(nameInput);
-  p.append(s1);
   const s2 = section('만든 사람');
   authorInput.placeholder = '닉네임 (비우면 익명의 조물러)';
   authorInput.maxLength = 20;
   authorInput.value = getAuthor();
   s2.append(authorInput);
-  p.append(s2);
-  publicToggle = toggle('🌍 모두의 작품에 공개', true, () => {});
-  p.append(publicToggle.root);
+  d.left.append(s1, s2);
 
-  saveBtn = button('💾 저장하기', 'primary', () => void save());
-  p.append(saveBtn);
+  const s3 = section('내려받기');
   const row = el('div', 'row');
-  row.append(
-    button('⬇ GLB 내려받기', '', () => { if (piece) void exportGLB(piece.mesh, pieceName(), studio.renderer).then(() => toast('GLB 파일을 내려받았어요')).catch(() => toast('내려받기에 실패했어요')); }),
-    button('📷 사진 저장', '', () => { if (piece) void exportPNG(studio.renderer, studio.scene, studio.camera, pieceName()).then(() => toast('사진을 저장했어요')); }),
-  );
-  p.append(row);
+  row.append(button('⬇ GLB', '', downloadGLB), button('📷 사진', '', savePhoto));
+  s3.append(row);
   turntable = toggle('🔄 턴테이블 돌리기', true, (v) => { studio.controls.autoRotate = (step === 'done' || step === 'view') && v; });
-  p.append(turntable.root);
+  d.right.append(el('h2', '', '감상<small>돌려 보고 내려받아요.</small>'), turntable.root, s3);
+  d.right.append(el('div', 'spacer'));
+  d.right.append(button('🆕 새로 만들기', '', () => { if (confirm('새 반죽을 고를까요? 저장하지 않은 작품은 사라져요.')) { disposePiece(); go('pick'); } }));
 
-  p.append(el('div', 'spacer'));
-  const row2 = el('div', 'row');
-  row2.append(
-    button('← 돌아가서 고치기', '', () => go(piece?.baked ? 'paint' : 'sculpt')),
-    button('🆕 새로 만들기', '', () => { if (confirm('새 반죽을 고를까요? 저장하지 않은 작품은 사라져요.')) { disposePiece(); go('pick'); } }),
+  fillBar(d,
+    button('← 돌아가서 고치기', 'back', () => go(piece?.baked ? 'paint' : 'sculpt')),
+    saveButton('💾 저장하기', 'primary'),
   );
-  p.append(row2);
 }
 
 function pieceName() {
@@ -731,83 +777,32 @@ async function save() {
   if (!piece) return;
   const g = piece.mesh.geometry;
   const colors = g.getAttribute('color') as THREE.BufferAttribute | undefined;
-  const work: Work = {
-    id: piece.id,
-    name: pieceName(),
-    baseId: piece.baseId,
-    createdAt: piece.createdAt,
-    updatedAt: Date.now(),
-    positions: (g.getAttribute('position').array as Float32Array).slice(),
-    index: (g.getIndex()!.array as Uint32Array).slice(),
-    colors: piece.baked && colors ? (colors.array as Float32Array).slice() : null,
-    uvs: piece.texture ? (g.getAttribute('uv').array as Float32Array).slice() : null,
-    texture: piece.texture,
-    baked: piece.baked,
-    glossy: piece.glossy,
-    thumb: studio.cutout(piece.mesh, 256),
-  };
+  const name = pieceName();
   const author = authorInput.value.trim();
   setAuthor(author);
-  saveBtn.disabled = true;
-  let local = false;
+  for (const b of saveBtns) b.disabled = true;
+  showBusy('💾 저장하는 중…');
   try {
-    await saveWork(work);
-    local = true;
-    piece.name = work.name;
-    nameInput.value = work.name;
-    if (!publicToggle.checked || !work.baked) {
-      toast(`"${work.name}" 을(를) 내 작품에 저장했어요 💾`);
-      return;
-    }
-    showBusy('🌍 모두의 작품에 올리는 중…');
+    // No accounts: a saved work goes straight to the server and shows up for everyone on the first screen.
     await publish({
-      id: work.id, name: work.name, author, baseId: work.baseId, baked: work.baked, glossy: work.glossy, thumb: work.thumb,
-      mesh: { positions: work.positions, index: work.index, colors: work.colors, uvs: work.uvs, texture: work.texture },
+      id: piece.id, name, author, baseId: piece.baseId, baked: piece.baked, glossy: piece.glossy, thumb: studio.cutout(piece.mesh, 256),
+      mesh: {
+        positions: g.getAttribute('position').array as Float32Array,
+        index: g.getIndex()!.array as Uint32Array,
+        colors: piece.baked && colors ? (colors.array as Float32Array) : null,
+        uvs: piece.texture ? (g.getAttribute('uv').array as Float32Array) : null,
+        texture: piece.texture,
+      },
     });
-    toast(`"${work.name}" 을(를) 저장하고 모두의 작품에 올렸어요 🌍`, 2800);
+    piece.name = name;
+    nameInput.value = name;
+    toast(`"${name}" 을(를) 저장했어요. 첫 화면에서 모두가 볼 수 있어요 🌍`, 2800);
   } catch (e) {
     console.error(e);
-    const why = e instanceof Error ? e.message : '';
-    toast(local ? `내 작품엔 저장했지만 공개하지 못했어요. ${why}` : '저장에 실패했어요. 브라우저 저장 공간을 확인해 주세요.', 3600);
+    toast(`저장하지 못했어요. ${e instanceof Error ? e.message : ''}`, 3600);
   } finally {
     hideBusy();
-    saveBtn.disabled = false;
-  }
-}
-
-// ---------------------------------------------------------------- gallery
-async function openGallery() {
-  const list = $('gallery-list');
-  list.innerHTML = '';
-  $('gallery').hidden = false;
-  const works = await listWorks();
-  if (works.length === 0) {
-    list.append(el('div', 'empty', '아직 저장한 작품이 없어요.<br/>완성 단계에서 💾 저장을 눌러 보세요!'));
-    return;
-  }
-  for (const w of works) {
-    const card = el('div', 'work');
-    const img = el('img');
-    img.src = w.thumb;
-    img.alt = w.name;
-    const info = el('div');
-    const base = findBase(w.baseId);
-    info.append(el('b', '', `${base.emoji} ${w.name}`), el('small', '', `${fmtDate(w.updatedAt)} · ${w.baked ? '구움' : '빚는 중'}`));
-    const acts = el('div', 'acts');
-    const load = el('button', '', '불러오기');
-    load.addEventListener('click', () => { void loadWork(w); $('gallery').hidden = true; });
-    const del = el('button', '', '삭제');
-    del.addEventListener('click', async () => {
-      if (!confirm(`"${w.name}" 을(를) 삭제할까요? 모두의 작품에 공개했다면 거기서도 내려가요.`)) return;
-      await deleteWork(w.id);
-      await unpublish(w.id).catch(() => false);
-      await openGallery();
-      if (step === 'pick') void refreshBgWorks();
-    });
-    acts.append(load, del);
-    info.append(acts);
-    card.append(img, info);
-    list.append(card);
+    for (const b of saveBtns) b.disabled = false;
   }
 }
 
@@ -831,14 +826,6 @@ async function mountMesh(meta: { id: string; name: string; baseId: string; creat
   glazeToggle.set(meta.glossy);
 }
 
-async function loadWork(w: Work) {
-  if (piece && !confirm('지금 작업 중인 작품을 닫고 불러올까요? 저장하지 않은 내용은 사라져요.')) return;
-  await mountMesh(w, w);
-  openView(w.name, `내 작품 · ${fmtDate(w.updatedAt)}`);
-}
-
-$('btn-gallery').addEventListener('click', () => void openGallery());
-$('gallery-close').addEventListener('click', () => { $('gallery').hidden = true; });
 $('btn-help').addEventListener('click', () => { $('help').hidden = false; });
 $('help-close').addEventListener('click', () => { $('help').hidden = true; });
 $('help').addEventListener('click', (e) => { if (e.target === e.currentTarget) $('help').hidden = true; });
@@ -940,7 +927,7 @@ window.addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
   if (meta && k === 'z') { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
   if (meta && k === 'y') { e.preventDefault(); redo(); return; }
-  if (e.key === 'Escape') { $('help').hidden = true; $('gallery').hidden = true; return; }
+  if (e.key === 'Escape') { $('help').hidden = true; return; }
   if (step === 'sculpt') {
     if (e.key === '[') sculptSliders.rad.set(sculptSettings.radius - 0.03);
     else if (e.key === ']') sculptSliders.rad.set(sculptSettings.radius + 0.03);

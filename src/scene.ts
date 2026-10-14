@@ -19,7 +19,7 @@ export class Studio {
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
 
-    this.scene.background = new THREE.Color('#f4ede2');
+    this.scene.background = new THREE.Color('#f4f4f7');
     this.renderer.setSize(Math.max(1, canvas.clientWidth), Math.max(1, canvas.clientHeight), false);
     const pmrem = new THREE.PMREMGenerator(this.renderer);
     this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
@@ -91,7 +91,7 @@ export class Studio {
 
   resize() {
     const w = this.canvas.clientWidth || window.innerWidth;
-    const h = this.canvas.clientHeight || window.innerHeight - 60;
+    const h = this.canvas.clientHeight || window.innerHeight - 64;
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
@@ -175,7 +175,7 @@ export class Studio {
     const c = document.createElement('canvas');
     c.width = c.height = size;
     const ctx = c.getContext('2d')!;
-    ctx.fillStyle = '#f4ede2';
+    ctx.fillStyle = '#f4f4f7';
     ctx.fillRect(0, 0, size, size);
     ctx.drawImage(src, (src.width - side) / 2, (src.height - side) / 2, side, side, 0, 0, size, size);
     return c.toDataURL('image/jpeg', 0.82);

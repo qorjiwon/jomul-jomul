@@ -2,18 +2,16 @@
 <html lang="ko">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>조물조물 · 나만의 찰흙 친구</title>
     <meta name="description" content="찰흙을 빚고, 가마에 굽고, 색칠해서 나만의 3D 친구를 만드는 공방" />
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Jua&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css" />
     <link rel="stylesheet" href="/src/styles.css" />
   </head>
   <body>
     <header class="topbar">
       <div class="brand">
-        <span class="brand-mark">🫙</span>
+        <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path fill="currentColor" d="M16 3.5c4.2 0 6.6 2.6 7.6 5.6 3.6.6 6.4 3.6 6.4 8 0 6.4-5.6 11.4-14 11.4S2 23.5 2 17.1c0-4.4 2.8-7.4 6.4-8C9.4 6.1 11.8 3.5 16 3.5Z"/><circle cx="11.6" cy="17" r="1.7" fill="#fff"/><circle cx="20.4" cy="17" r="1.7" fill="#fff"/><path d="M13.6 21.2c1.4 1.2 3.4 1.2 4.8 0" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/></svg>
         <span class="brand-name">조물조물</span>
         <span class="brand-sub">나만의 찰흙 친구 만들기</span>
       </div>
@@ -25,18 +23,12 @@
         <li data-step="done"><b>5</b>완성</li>
       </ol>
       <div class="topbar-actions">
-        <button class="ghost" id="btn-gallery">🗂 내 작품</button>
         <button class="ghost" id="btn-help">? 도움말</button>
       </div>
     </header>
 
-    <main class="stage">
+    <main class="stage" id="stage">
       <canvas id="view"></canvas>
-
-      <aside class="panel" id="panel-view" hidden></aside>
-      <aside class="panel" id="panel-sculpt" hidden></aside>
-      <aside class="panel" id="panel-paint" hidden></aside>
-      <aside class="panel" id="panel-done" hidden></aside>
 
       <div class="hint" id="hint"></div>
       <div class="fps" id="fps" hidden></div>
@@ -89,11 +81,6 @@
         <div class="busy-card"><div class="spinner"></div><p id="busy-text">반죽 준비 중…</p></div>
       </section>
 
-      <aside class="drawer" id="gallery" hidden>
-        <header><h2>내 작품</h2><button class="icon" id="gallery-close" aria-label="닫기">✕</button></header>
-        <div class="drawer-body" id="gallery-list"></div>
-      </aside>
-
       <section class="modal" id="help" hidden>
         <div class="modal-card">
           <header><h2>이렇게 만들어요</h2><button class="icon" id="help-close" aria-label="닫기">✕</button></header>
@@ -119,7 +106,7 @@
                 <li>가마에 구우면 모양이 굳고 색칠을 할 수 있어요</li>
                 <li>✨ AI에게 첫 반죽을 부탁할 수도 있어요</li>
                 <li>📂 갖고 있는 GLB 모형을 불러와 이어서 빚을 수 있어요 (끌어다 놓아도 돼요)</li>
-                <li>저장하면 첫 화면 배경에 모두의 작품으로 떠다녀요</li>
+                <li>저장하면 서버에 올라가 첫 화면 아래 모두의 작품 동그라미에 들어가요</li>
                 <li>GLB·사진으로 내려받을 수도 있어요</li>
               </ul></div>
           </div>
