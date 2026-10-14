@@ -16,7 +16,10 @@ export interface PublicWork {
 export interface MeshData {
   positions: Float32Array;
   index: Uint32Array;
+  /** RGB, or RGBA (paint layer over `texture`) per vertex. */
   colors: Float32Array | null;
+  uvs?: Float32Array | null;
+  texture?: Blob | null;
 }
 
 export interface AiShape { name: string; emoji: string; shape: Shape }
@@ -37,35 +40,63 @@ async function gunzip(bytes: ArrayBuffer): Promise<ArrayBuffer> {
   return new Response(stream).arrayBuffer();
 }
 
-/** [magic, nV, nI, flags] + f32 positions + u32 index + u8 colors (if any), gzipped. */
+/**
+ * [magic, nV, nI, flags] + f32 positions + u32 index + u8 colors (if any) + textured section, gzipped.
+ * flags: 1 = colors, 2 = colors are RGBA, 4 = textured (f32 uv per vertex, u32 image byte length, image bytes).
+ * Keep in sync with checkMesh in server/index.ts.
+ */
 export async function packMesh(m: MeshData): Promise<Uint8Array> {
   const nV = m.positions.length / 3, nI = m.index.length;
-  const size = 16 + nV * 12 + nI * 4 + (m.colors ? nV * 3 : 0);
+  const ch = m.colors ? m.colors.length / nV : 0;
+  const tex = m.uvs && m.texture ? new Uint8Array(await m.texture.arrayBuffer()) : null;
+  const colorBytes = nV * ch;
+  const size = 16 + nV * 12 + nI * 4 + colorBytes + (tex ? nV * 8 + 4 + tex.length : 0);
   const buf = new ArrayBuffer(size);
-  new Uint32Array(buf, 0, 4).set([MAGIC, nV, nI, m.colors ? 1 : 0]);
+  const dv = new DataView(buf);
+  [MAGIC, nV, nI, (ch ? 1 : 0) | (ch === 4 ? 2 : 0) | (tex ? 4 : 0)].forEach((x, i) => dv.setUint32(i * 4, x, true));
   new Float32Array(buf, 16, nV * 3).set(m.positions);
   new Uint32Array(buf, 16 + nV * 12, nI).set(m.index);
+  let off = 16 + nV * 12 + nI * 4;
   if (m.colors) {
-    const c = new Uint8Array(buf, 16 + nV * 12 + nI * 4, nV * 3);
+    const c = new Uint8Array(buf, off, colorBytes);
     for (let i = 0; i < c.length; i++) c[i] = Math.round(Math.min(1, Math.max(0, m.colors[i])) * 255);
+    off += colorBytes;
+  }
+  if (tex) {
+    new Uint8Array(buf, off, nV * 8).set(new Uint8Array(m.uvs!.buffer, m.uvs!.byteOffset, nV * 8));
+    off += nV * 8;
+    dv.setUint32(off, tex.length, true);
+    new Uint8Array(buf, off + 4, tex.length).set(tex);
   }
   return gzip(new Uint8Array(buf));
 }
 
 export async function unpackMesh(gz: ArrayBuffer): Promise<MeshData> {
   const buf = await gunzip(gz);
-  const [magic, nV, nI, flags] = new Uint32Array(buf, 0, 4);
-  const hasColors = (flags & 1) === 1;
-  if (magic !== MAGIC || buf.byteLength !== 16 + nV * 12 + nI * 4 + (hasColors ? nV * 3 : 0)) throw new Error('bad mesh');
+  const dv = new DataView(buf);
+  const [magic, nV, nI, flags] = [0, 1, 2, 3].map((i) => dv.getUint32(i * 4, true));
+  const ch = flags & 1 ? (flags & 2 ? 4 : 3) : 0;
+  if (magic !== MAGIC) throw new Error('bad mesh');
+  let off = 16 + nV * 12 + nI * 4;
   const positions = new Float32Array(buf.slice(16, 16 + nV * 12));
-  const index = new Uint32Array(buf.slice(16 + nV * 12, 16 + nV * 12 + nI * 4));
+  const index = new Uint32Array(buf.slice(16 + nV * 12, off));
   let colors: Float32Array | null = null;
-  if (hasColors) {
-    const c = new Uint8Array(buf, 16 + nV * 12 + nI * 4, nV * 3);
+  if (ch) {
+    const c = new Uint8Array(buf, off, nV * ch);
     colors = new Float32Array(c.length);
     for (let i = 0; i < c.length; i++) colors[i] = c[i] / 255;
+    off += nV * ch;
   }
-  return { positions, index, colors };
+  let uvs: Float32Array | null = null, texture: Blob | null = null;
+  if (flags & 4) {
+    uvs = new Float32Array(buf.slice(off, off + nV * 8));
+    off += nV * 8;
+    const len = dv.getUint32(off, true);
+    texture = new Blob([buf.slice(off + 4, off + 4 + len)]);
+    off += 4 + len;
+  }
+  if (off !== buf.byteLength) throw new Error('bad mesh');
+  return { positions, index, colors, uvs, texture };
 }
 
 function toBase64(bytes: Uint8Array): string {

@@ -8,7 +8,11 @@ export interface Work {
   updatedAt: number;
   positions: Float32Array;
   index: Uint32Array;
+  /** RGB (or RGBA paint layer when textured) per vertex. */
   colors: Float32Array | null;
+  /** Per-vertex UVs + base-color image for pieces imported with their original texture. */
+  uvs?: Float32Array | null;
+  texture?: Blob | null;
   baked: boolean;
   glossy: boolean;
   thumb: string;

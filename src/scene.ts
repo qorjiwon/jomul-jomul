@@ -11,7 +11,7 @@ export class Studio {
   readonly key: THREE.DirectionalLight;
 
   constructor(readonly canvas: HTMLCanvasElement) {
-    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -109,6 +109,56 @@ export class Studio {
     this.camera.position.copy(center).addScaledVector(dir, dist);
     this.controls.target.copy(center);
     this.controls.update();
+  }
+
+  /**
+   * Render `obj` alone (no wheel, no background) from a fixed 3/4 view and return a transparent
+   * square image tightly cropped around it. The camera is restored afterwards.
+   */
+  cutout(obj: THREE.Object3D, size = 256): string {
+    const camPos = this.camera.position.clone(), target = this.controls.target.clone();
+    const bg = this.scene.background;
+    // Everything else that draws (wheel, rim, shadow catcher, brush rings) steps aside.
+    const hidden = this.scene.children.filter((c) => c.visible && c !== obj && c instanceof THREE.Mesh);
+    const added = !obj.parent;
+    if (added) this.scene.add(obj);
+    hidden.forEach((c) => { c.visible = false; });
+    this.scene.background = null;
+    this.fitCamera(new THREE.Box3().setFromObject(obj));
+    this.renderer.setClearColor(0x000000, 0);
+    this.renderer.render(this.scene, this.camera);
+
+    // Find the opaque bounds, then crop a padded square around them.
+    const src = this.renderer.domElement;
+    const probe = document.createElement('canvas');
+    probe.width = src.width; probe.height = src.height;
+    const pctx = probe.getContext('2d', { willReadFrequently: true })!;
+    pctx.drawImage(src, 0, 0);
+    const { data, width, height } = pctx.getImageData(0, 0, probe.width, probe.height);
+    let x0 = width, y0 = height, x1 = -1, y1 = -1;
+    for (let y = 0; y < height; y += 2) {
+      for (let x = 0; x < width; x += 2) {
+        if (data[(y * width + x) * 4 + 3] > 8) {
+          if (x < x0) x0 = x; if (x > x1) x1 = x;
+          if (y < y0) y0 = y; if (y > y1) y1 = y;
+        }
+      }
+    }
+    if (x1 < 0) { x0 = 0; y0 = 0; x1 = width - 1; y1 = height - 1; }
+    const side = Math.max(x1 - x0, y1 - y0) * 1.08 + 4;
+    const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    c.getContext('2d')!.drawImage(probe, cx - side / 2, cy - side / 2, side, side, 0, 0, size, size);
+
+    this.scene.background = bg;
+    hidden.forEach((h) => { h.visible = true; });
+    if (added) this.scene.remove(obj);
+    this.camera.position.copy(camPos);
+    this.controls.target.copy(target);
+    this.controls.update();
+    // WebP keeps transparency and stays small; browsers without a WebP encoder hand back PNG.
+    return c.toDataURL('image/webp', 0.86);
   }
 
   render() {

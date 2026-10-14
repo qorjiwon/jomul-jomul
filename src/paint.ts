@@ -28,6 +28,10 @@ export class Painter {
 
   private col: Float32Array;
   private readonly count: number;
+  /** 3 = plain vertex colors; 4 = paint layer over a texture (rgb = paint, a = coverage, 0 shows the texture). */
+  private readonly stride: number;
+  /** Displayed color under a vertex where nothing is painted (texture lookup), for the picker. */
+  underlay: ((vertex: number) => THREE.Color | null) | null = null;
   private undoStack: Float32Array[] = [];
   private redoStack: Float32Array[] = [];
   private strokeBase: Float32Array | null = null;
@@ -48,6 +52,7 @@ export class Painter {
       g.setAttribute('color', attr);
     }
     this.col = attr.array as Float32Array;
+    this.stride = attr.itemSize;
     this.mask = new Float32Array(this.count);
   }
 
@@ -89,8 +94,9 @@ export class Painter {
   private dab(center: THREE.Vector3) {
     const base = this.strokeBase!;
     const pos = (this.mesh.geometry.getAttribute('position') as THREE.BufferAttribute).array as Float32Array;
-    const { radius, mask, col, opacity, hardness } = this;
-    const target = this.tool === 'eraser' ? this.baseColor : this.color;
+    const { radius, mask, col, opacity, hardness, stride } = this;
+    const erase = this.tool === 'eraser';
+    const target = erase ? this.baseColor : this.color;
     const r2 = radius * radius;
     const cx = center.x, cy = center.y, cz = center.z;
     for (let v = 0; v < this.count; v++) {
@@ -107,6 +113,17 @@ export class Painter {
       if (w <= mask[v]) continue;
       mask[v] = w;
       const k = w * opacity;
+      if (stride === 4) {
+        const c = v * 4, a0 = base[c + 3];
+        col[c + 3] = a0 + ((erase ? 0 : 1) - a0) * k;
+        if (!erase) {
+          const kc = a0 > 0 ? k : 1; // unpainted: take the brush color outright, coverage does the blending
+          col[c] = base[c] + (target.r - base[c]) * kc;
+          col[c + 1] = base[c + 1] + (target.g - base[c + 1]) * kc;
+          col[c + 2] = base[c + 2] + (target.b - base[c + 2]) * kc;
+        }
+        continue;
+      }
       col[i] = base[i] + (target.r - base[i]) * k;
       col[i + 1] = base[i + 1] + (target.g - base[i + 1]) * k;
       col[i + 2] = base[i + 2] + (target.b - base[i + 2]) * k;
@@ -115,14 +132,20 @@ export class Painter {
 
   fill(color: THREE.Color) {
     this.pushUndo();
-    for (let i = 0; i < this.count; i++) { this.col[i * 3] = color.r; this.col[i * 3 + 1] = color.g; this.col[i * 3 + 2] = color.b; }
+    const s = this.stride;
+    for (let i = 0; i < this.count; i++) {
+      this.col[i * s] = color.r; this.col[i * s + 1] = color.g; this.col[i * s + 2] = color.b;
+      if (s === 4) this.col[i * s + 3] = 1;
+    }
     this.commit();
   }
 
   pick(faceIndex: number): THREE.Color {
     const idx = this.mesh.geometry.getIndex()!;
     const v = idx.getX(faceIndex * 3);
-    return new THREE.Color(this.col[v * 3], this.col[v * 3 + 1], this.col[v * 3 + 2]);
+    const s = this.stride;
+    if (s === 4 && this.col[v * 4 + 3] < 0.5) { const u = this.underlay?.(v); if (u) return u; }
+    return new THREE.Color(this.col[v * s], this.col[v * s + 1], this.col[v * s + 2]);
   }
 
   private commit() {

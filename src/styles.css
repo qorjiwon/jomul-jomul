@@ -92,14 +92,14 @@ button { cursor: pointer; border: 0; background: none; }
 .overlay { position: absolute; inset: 0; display: grid; place-items: center; z-index: 10; }
 .overlay.pick { background: radial-gradient(ellipse at top, #fff7ec, var(--bg) 70%); overflow: auto; padding: 32px 24px 48px; place-items: start center; }
 .pick-card { width: min(860px, 100%); text-align: center; }
-.pick-card h1 { font-family: var(--font-display); font-size: 40px; margin: 0 0 6px; color: var(--clay-deep); }
+.pick-card h1 { font-family: var(--font-display); font-size: 40px; margin: 0 0 22px; color: var(--clay-deep); }
 .pick-card p { margin: 0 0 26px; color: var(--ink-soft); }
-.base-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 14px; }
-.base { background: var(--paper); border: 2px solid var(--line); border-radius: 22px; padding: 22px 12px 16px; display: flex; flex-direction: column; align-items: center; gap: 8px; transition: all .18s; box-shadow: 0 4px 14px rgba(80,50,20,.06); }
-.base .emoji { font-size: 54px; line-height: 1; filter: drop-shadow(0 6px 10px rgba(0,0,0,.12)); }
-.base b { font-family: var(--font-display); font-size: 20px; color: var(--ink); }
-.base span { font-size: 12px; color: var(--ink-soft); }
-.base:hover { transform: translateY(-4px); border-color: var(--clay); box-shadow: 0 14px 30px rgba(201,115,74,.18); }
+.base-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); gap: 10px; }
+.base { background: var(--paper); border: 2px solid var(--line); border-radius: 16px; padding: 11px 8px 9px; display: flex; flex-direction: column; align-items: center; gap: 4px; transition: all .18s; box-shadow: 0 3px 10px rgba(80,50,20,.05); }
+.base .emoji { font-size: 30px; line-height: 1; filter: drop-shadow(0 4px 6px rgba(0,0,0,.12)); }
+.base b { font-family: var(--font-display); font-size: 16px; font-weight: 400; color: var(--ink); }
+.base span { font-size: 11px; line-height: 1.35; color: var(--ink-soft); }
+.base:hover { transform: translateY(-3px); border-color: var(--clay); box-shadow: 0 14px 30px rgba(201,115,74,.18); }
 .pick-foot { margin-top: 22px; display: flex; gap: 14px; justify-content: center; align-items: center; flex-wrap: wrap; font-size: 13px; }
 /* AI starting lump */
 .ai-card { background: linear-gradient(135deg, #fff4e8, #fdeee3); border: 2px solid #f0cfb6; border-radius: 22px; padding: 18px 18px 14px; text-align: left; margin-bottom: 22px; box-shadow: 0 6px 20px rgba(201,115,74,.12); }
@@ -117,15 +117,29 @@ button { cursor: pointer; border: 0; background: none; }
 .divider { display: flex; align-items: center; gap: 12px; color: var(--ink-soft); font-size: 13px; margin: 0 0 14px; }
 .divider::before, .divider::after { content: ''; flex: 1; height: 1px; background: var(--line); }
 
+/* view panel: 손보기 unfolds the editing options */
+.fix-list { display: none; flex-direction: column; gap: 6px; }
+.fix-list.open { display: flex; }
+.fix-list.open .fix { animation: fix-in .26s ease-out calc(var(--i, 0) * 50ms) both; }
+.fix { display: flex; align-items: center; gap: 10px; text-align: left; padding: 9px 11px; border-radius: 12px; background: #fff; border: 1px solid var(--line); transition: border-color .15s, transform .15s; }
+.fix:hover { border-color: var(--clay); transform: translateX(2px); }
+.fix .ico { font-size: 20px; }
+.fix b { display: block; font-size: 13px; }
+.fix small { display: block; font-size: 11px; color: var(--ink-soft); margin-top: 1px; }
+@keyframes fix-in { from { opacity: 0; transform: translateY(-6px); } }
+
 /* background floaters: other people's works drifting behind the landing card */
 .pick-card { position: relative; z-index: 1; pointer-events: none; }
 .pick-card > * { pointer-events: auto; }
 .bg-works { position: absolute; left: 0; top: 0; width: 100%; z-index: 0; pointer-events: none; }
-.bgwork { position: absolute; pointer-events: auto; padding: 0; border-radius: 50%; opacity: .5; transition: opacity .25s, transform .25s; animation: drift var(--dur, 9s) ease-in-out var(--delay, 0s) infinite alternate; }
-.bgwork img { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; display: block; box-shadow: 0 10px 26px rgba(80,50,20,.18); border: 3px solid #fffaf3; background: var(--bg); transform: rotate(var(--rot, 0deg)); }
-.bgwork span { position: absolute; left: 50%; top: calc(100% + 6px); transform: translateX(-50%); white-space: nowrap; font-size: 12px; background: var(--ink); color: #fff; padding: 4px 10px; border-radius: 999px; opacity: 0; transition: opacity .2s; pointer-events: none; }
-.bgwork:hover { opacity: 1; z-index: 2; animation-play-state: paused; transform: scale(1.12); }
-.bgwork:hover span { opacity: 1; }
+.bgwork { position: absolute; pointer-events: auto; opacity: 0; touch-action: none; user-select: none; transition: opacity .4s, scale .2s; animation: drift var(--dur, 9s) ease-in-out var(--delay, 0s) infinite alternate; }
+.bgwork.ready { opacity: .9; }
+.bgwork img { width: 100%; height: 100%; object-fit: contain; display: block; transform: rotate(var(--rot, 0deg)); filter: drop-shadow(0 12px 14px rgba(80,50,20,.22)); pointer-events: none; }
+.bgwork span { position: absolute; left: 50%; top: calc(100% + 4px); transform: translateX(-50%); white-space: nowrap; font-size: 12px; background: var(--ink); color: #fff; padding: 4px 10px; border-radius: 999px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.bgwork.hot { opacity: 1; z-index: 2; cursor: grab; animation-play-state: paused; scale: 1.08; }
+.bgwork.hot span { opacity: 1; }
+.bgwork.grabbed { cursor: grabbing; scale: 1.14; z-index: 3; }
+.bgwork.grabbed img { filter: drop-shadow(0 22px 20px rgba(80,50,20,.3)); }
 @keyframes drift { from { translate: 0 0; } to { translate: var(--dx, 6px) var(--dy, -14px); } }
 @media (prefers-reduced-motion: reduce) { .bgwork { animation: none; } }
 .base.import .emoji { filter: none; }
@@ -180,5 +194,5 @@ button { cursor: pointer; border: 0; background: none; }
   .hint { bottom: auto; top: 12px; font-size: 12px; }
   .pick-card h1 { font-size: 30px; }
   .ai-row { flex-direction: column; }
-  .bgwork { opacity: .32; }
+  .bgwork.ready { opacity: .6; }
 }

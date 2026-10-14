@@ -25,6 +25,7 @@ export interface Store {
   readonly kind: string;
   list(limit: number, before?: number): Promise<WorkMeta[]>;
   tokenHash(id: string): Promise<string | null>;
+  updatedAt(id: string): Promise<number | null>;
   thumb(id: string): Promise<Buffer | null>;
   mesh(id: string): Promise<Buffer | null>;
   upsert(rec: WorkRecord): Promise<void>;
@@ -67,12 +68,13 @@ class PgStore implements Store {
     }));
   }
 
-  private async col(id: string, col: 'token_hash' | 'thumb' | 'mesh') {
+  private async col(id: string, col: 'token_hash' | 'updated_at' | 'thumb' | 'mesh') {
     await this.ready;
     const { rows } = await this.pool.query(`SELECT ${col} AS v FROM works WHERE id = $1`, [id]);
     return rows[0]?.v ?? null;
   }
   tokenHash(id: string) { return this.col(id, 'token_hash') as Promise<string | null>; }
+  async updatedAt(id: string) { const v = await this.col(id, 'updated_at'); return v === null ? null : Number(v); }
   thumb(id: string) { return this.col(id, 'thumb') as Promise<Buffer | null>; }
   mesh(id: string) { return this.col(id, 'mesh') as Promise<Buffer | null>; }
 
@@ -114,6 +116,8 @@ class FileStore implements Store {
       .map(({ tokenHash: _t, ...m }) => m);
   }
   async tokenHash(id: string) { return (await this.metaOf(id))?.tokenHash ?? null; }
+  async updatedAt(id: string) { return (await this.metaOf(id))?.updatedAt ?? null; }
+  // `.jpg` is just the blob's file name; newer thumbs inside are WebP/PNG.
   thumb(id: string) { return this.read(this.p(id, 'jpg')); }
   mesh(id: string) { return this.read(this.p(id, 'bin')); }
 
@@ -140,19 +144,25 @@ export function createStore(): Store {
   return new FileStore(path.resolve('data/works'));
 }
 
-/** Inserts the bundled featured works (server/seed/<id>.{json,jpg,bin}) that aren't in the store yet. Nobody holds their token. */
+/**
+ * Inserts the bundled featured works (server/seed/<id>.{json,webp|png|jpg,bin}) that aren't in the store yet,
+ * or refreshes them when the bundled copy is newer. Nobody holds their token.
+ */
 export async function seedFeatured(store: Store, dir = path.resolve('server/seed')) {
   let files: string[] = [];
-  try { files = (await fs.readdir(dir)).filter((f) => f.endsWith('.json')); } catch { return; }
-  for (const f of files) {
+  try { files = await fs.readdir(dir); } catch { return; }
+  for (const f of files.filter((n) => n.endsWith('.json'))) {
     const id = f.slice(0, -5);
-    if (await store.tokenHash(id)) continue;
     const meta = JSON.parse(await fs.readFile(path.join(dir, f), 'utf8')) as WorkMeta;
+    const stored = await store.updatedAt(id);
+    if (stored !== null && stored >= meta.updatedAt) continue;
+    const thumbFile = ['webp', 'png', 'jpg'].map((e) => `${id}.${e}`).find((n) => files.includes(n));
+    if (!thumbFile) continue;
     await store.upsert({
       ...meta,
       id,
-      tokenHash: crypto.randomBytes(32).toString('hex'),
-      thumb: await fs.readFile(path.join(dir, `${id}.jpg`)),
+      tokenHash: (await store.tokenHash(id)) ?? crypto.randomBytes(32).toString('hex'),
+      thumb: await fs.readFile(path.join(dir, thumbFile)),
       mesh: await fs.readFile(path.join(dir, `${id}.bin`)),
     });
     console.log(`[jomul] seeded featured work "${meta.name}"`);

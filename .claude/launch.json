@@ -2,6 +2,7 @@
   "version": "0.0.1",
   "configurations": [
     { "name": "jomul-dev", "runtimeExecutable": "pnpm", "runtimeArgs": ["dev"], "port": 5173 },
-    { "name": "jomul-dev-5174", "runtimeExecutable": "sh", "runtimeArgs": ["-c", "PORT=5174 pnpm dev"], "port": 5174 }
+    { "name": "jomul-dev-5174", "runtimeExecutable": "sh", "runtimeArgs": ["-c", "PORT=5174 pnpm dev"], "port": 5174 },
+    { "name": "jomul-dev-auto", "runtimeExecutable": "pnpm", "runtimeArgs": ["dev"], "port": 5180, "autoPort": true }
   ]
 }

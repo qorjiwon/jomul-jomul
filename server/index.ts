@@ -19,8 +19,13 @@ app.disable('x-powered-by');
 app.set('trust proxy', true);
 
 const ID_RE = /^[a-zA-Z0-9-]{8,64}$/;
-const MAX_MESH = 10 * 1024 * 1024; // gzipped bytes
+const MAX_MESH = 16 * 1024 * 1024; // gzipped bytes
 const MAX_THUMB = 400 * 1024;
+/** Thumbs are JPEG (older saves) or transparent WebP/PNG cutouts; tell them apart by their magic bytes. */
+const imageType = (b: Buffer) =>
+  b.subarray(0, 4).toString('latin1') === '\x89PNG' ? 'image/png'
+  : b.subarray(8, 12).toString('latin1') === 'WEBP' ? 'image/webp'
+  : 'image/jpeg';
 const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
 const text = (v: unknown, max: number) => (typeof v === 'string' ? v.replace(/[\u0000-\u001f]/g, '').trim().slice(0, max) : '');
 
@@ -29,9 +34,17 @@ function checkMesh(gz: Buffer): boolean {
   let raw: Buffer;
   try { raw = zlib.gunzipSync(gz, { maxOutputLength: 64 * 1024 * 1024 }); } catch { return false; }
   if (raw.length < 16 || raw.readUInt32LE(0) !== 0x314d4f4a) return false; // 'JOM1'
-  const nV = raw.readUInt32LE(4), nI = raw.readUInt32LE(8), colors = raw.readUInt32LE(12) & 1;
+  const nV = raw.readUInt32LE(4), nI = raw.readUInt32LE(8), flags = raw.readUInt32LE(12);
   if (nV < 4 || nI < 12 || nI % 3 !== 0 || nV > 2_000_000) return false;
-  return raw.length === 16 + nV * 12 + nI * 4 + (colors ? nV * 3 : 0);
+  let off = 16 + nV * 12 + nI * 4 + (flags & 1 ? nV * (flags & 2 ? 4 : 3) : 0);
+  if (flags & 4) {
+    off += nV * 8;
+    if (raw.length < off + 4) return false;
+    const texLen = raw.readUInt32LE(off);
+    if (texLen > 12 * 1024 * 1024) return false;
+    off += 4 + texLen;
+  }
+  return raw.length === off;
 }
 
 // ---------------------------------------------------------------- tiny rate limiter
@@ -53,7 +66,7 @@ const savePerIp = limiter(30, 10 * 60_000);
 
 // ---------------------------------------------------------------- API
 const api = express.Router();
-api.use(express.json({ limit: '16mb' }));
+api.use(express.json({ limit: '24mb' }));
 
 api.get('/config', (_req, res) => { res.json({ ai: aiEnabled(), storage: store.kind }); });
 
@@ -66,7 +79,7 @@ api.get('/works', async (req, res) => {
 api.get('/works/:id/thumb', async (req, res) => {
   const b = ID_RE.test(req.params.id) ? await store.thumb(req.params.id) : null;
   if (!b) { res.sendStatus(404); return; }
-  res.type('image/jpeg').set('Cache-Control', 'public, max-age=60').send(b);
+  res.type(imageType(b)).set('Cache-Control', 'public, max-age=60').send(b);
 });
 
 api.get('/works/:id/mesh', async (req, res) => {
@@ -85,7 +98,7 @@ api.put('/works/:id', async (req, res) => {
   const existing = await store.tokenHash(id);
   if (existing && existing !== sha256(token)) { res.status(403).json({ error: '다른 사람의 작품은 덮어쓸 수 없어요.' }); return; }
 
-  const thumbMatch = /^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/.exec(String(body.thumb ?? ''));
+  const thumbMatch = /^data:image\/(?:jpeg|png|webp);base64,([A-Za-z0-9+/=]+)$/.exec(String(body.thumb ?? ''));
   const thumb = thumbMatch ? Buffer.from(thumbMatch[1], 'base64') : null;
   const mesh = typeof body.mesh === 'string' ? Buffer.from(body.mesh, 'base64') : null;
   if (!thumb || thumb.length > MAX_THUMB || !mesh || mesh.length > MAX_MESH || !checkMesh(mesh)) {

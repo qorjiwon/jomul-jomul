@@ -5,14 +5,14 @@ import { compileShape, shapeBounds, type Shape } from './sdf';
 import { buildClayMesh, buildAdjacency, type Adjacency } from './mesher';
 import { Sculptor, SCULPT_TOOLS, type SculptTool, type Hit } from './sculpt';
 import { Painter, PAINT_TOOLS, PALETTE, type PaintTool } from './paint';
-import { runBake, makeClayMaterial, applyFiredLook, applyClayLook, FIRED_COLOR } from './bake';
+import { runBake, makeClayMaterial, applyFiredLook, applyClayLook, loadTexture, FIRED_COLOR } from './bake';
 import { listWorks, saveWork, deleteWork, newId, type Work } from './storage';
-import { importGLB } from './importer';
+import { importGLB, makeSculptable, seamlessNormals } from './importer';
 import { askAiShape, fetchConfig, getAuthor, listPublic, loadPublicMesh, publish, setAuthor, thumbUrl, unpublish, type MeshData, type PublicWork } from './cloud';
 import { exportGLB, exportPNG } from './exporter';
 import { $, el, section, button, slider, toggle, toolGrid, toast, setStep, setHint, fmtDate } from './ui';
 
-type Step = 'pick' | 'sculpt' | 'bake' | 'paint' | 'done';
+type Step = 'pick' | 'view' | 'sculpt' | 'bake' | 'paint' | 'done';
 type ClayMeshObj = THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
 
 interface Piece {
@@ -26,6 +26,8 @@ interface Piece {
   painter: Painter | null;
   baked: boolean;
   glossy: boolean;
+  /** Original base-color image for pieces imported with their texture (painted over, never resampled). */
+  texture: Blob | null;
 }
 
 // ---------------------------------------------------------------- state
@@ -108,18 +110,28 @@ function disposePiece() {
   piece = null;
 }
 
-function mountPiece(p: { id: string; name: string; baseId: string; createdAt: number; geometry: THREE.BufferGeometry; adjacency: Adjacency; baked: boolean; glossy: boolean }) {
+function mountPiece(p: { id: string; name: string; baseId: string; createdAt: number; geometry: THREE.BufferGeometry; adjacency: Adjacency; baked: boolean; glossy: boolean; texture?: { blob: Blob; tex: THREE.Texture } | null }) {
   disposePiece();
   const mat = makeClayMaterial();
   const mesh = new THREE.Mesh(p.geometry, mat) as ClayMeshObj;
   mesh.castShadow = mesh.receiveShadow = true;
   studio.scene.add(mesh);
   const sculptor = new Sculptor(mesh, p.adjacency);
-  piece = { ...p, mesh, sculptor, painter: null };
+  const textured = p.baked && p.texture ? p.texture : null;
+  piece = { ...p, mesh, sculptor, painter: null, texture: textured?.blob ?? null };
   applySculptSettings();
   if (p.baked) {
     applyFiredLook(mat, p.glossy);
-    piece.painter = new Painter(mesh, FIRED_COLOR);
+    if (textured) {
+      mat.map = textured.tex;
+      mat.needsUpdate = true;
+      // Paint layer over the texture: rgb = paint, a = coverage (0 = show the texture).
+      if (p.geometry.getAttribute('color')?.itemSize !== 4) {
+        p.geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(p.geometry.getAttribute('position').count * 4), 4));
+      }
+    }
+    piece.painter = new Painter(mesh, textured ? new THREE.Color(1, 1, 1) : FIRED_COLOR);
+    if (textured) piece.painter.underlay = textureUnderlay(textured.tex, p.geometry);
     applyPaintSettings();
   }
   studio.fitCamera(p.geometry.boundingBox!);
@@ -150,6 +162,7 @@ function panelHead(titleHtml: string, ...hist: HTMLElement[]) {
 
 // ---------------------------------------------------------------- steps
 const panels: Record<string, HTMLElement> = {
+  view: $('panel-view'),
   sculpt: $('panel-sculpt'),
   paint: $('panel-paint'),
   done: $('panel-done'),
@@ -157,14 +170,15 @@ const panels: Record<string, HTMLElement> = {
 
 function go(next: Step) {
   step = next;
-  setStep(next);
+  setStep(next === 'view' ? 'done' : next);
   for (const [k, p] of Object.entries(panels)) p.hidden = k !== next;
   $('pick-overlay').hidden = next !== 'pick';
   $('bake-overlay').hidden = next !== 'bake';
-  studio.controls.autoRotate = next === 'done' && turntable.checked;
+  studio.controls.autoRotate = (next === 'done' || next === 'view') && turntable.checked;
   cursor.visible = ghost.visible = false;
   if (next === 'sculpt') hintForSculpt();
   else if (next === 'paint') hintForPaint();
+  else if (next === 'view') setHint('드래그해서 돌려보며 감상해요 · ✏️ 손보기를 누르면 고칠 수 있어요');
   else if (next === 'done') setHint('드래그해서 돌려보며 감상해요 · 저장하거나 내려받을 수 있어요');
   else setHint('');
   if (next === 'pick') void refreshBgWorks();
@@ -239,9 +253,39 @@ async function startBake() {
   toast('잘 구워졌어요! 이제 색칠해 보세요 🎨', 2600);
 }
 
+/** Picker fallback for unpainted spots: the texture's color at that vertex's UV. */
+function textureUnderlay(tex: THREE.Texture, g: THREE.BufferGeometry) {
+  let px: { data: Uint8ClampedArray; w: number; h: number } | null = null;
+  const uv = g.getAttribute('uv');
+  return (v: number) => {
+    if (!px) {
+      const img = tex.image as ImageBitmap;
+      const c = document.createElement('canvas');
+      c.width = img.width; c.height = img.height;
+      const ctx = c.getContext('2d', { willReadFrequently: true })!;
+      ctx.drawImage(img, 0, 0);
+      px = { data: ctx.getImageData(0, 0, c.width, c.height).data, w: c.width, h: c.height };
+    }
+    const wrap = (x: number) => x - Math.floor(x);
+    const x = Math.min(px.w - 1, Math.floor(wrap(uv.getX(v)) * px.w));
+    const y = Math.min(px.h - 1, Math.floor(wrap(uv.getY(v)) * px.h));
+    const i = (y * px.w + x) * 4;
+    return new THREE.Color().setRGB(px.data[i] / 255, px.data[i + 1] / 255, px.data[i + 2] / 255, THREE.SRGBColorSpace);
+  };
+}
+
 function unbake() {
   if (!piece || !piece.baked) return;
   if (!confirm('다시 빚으면 칠한 색이 모두 지워져요. 계속할까요?')) return;
+  if (piece.texture) {
+    // Textured meshes keep UV seams split; weld them into one clay surface before sculpting.
+    const g0 = piece.mesh.geometry;
+    const m = makeSculptable(g0.getAttribute('position').array as Float32Array, g0.getIndex()!.array as Uint32Array);
+    const { id, name, baseId, createdAt } = piece;
+    mountMesh({ id, name, baseId, createdAt, baked: false, glossy: false }, { positions: m.positions, index: m.index, colors: null });
+    go('sculpt');
+    return;
+  }
   piece.mesh.geometry.deleteAttribute('color');
   applyClayLook(piece.mesh.material);
   piece.painter = null;
@@ -291,10 +335,13 @@ async function startGlb(file: File) {
     const m = await importGLB(file);
     hideBusy();
     const keepColor = m.colors !== null && confirm('색이 칠해진 모형이에요.\n\n확인: 색을 그대로 두고 색칠 단계로 열기\n취소: 색을 빼고 찰흙 상태로 빚기부터 시작');
-    mountMesh(
-      { id: newId(), name: m.name, baseId: GLB_BASE.id, createdAt: Date.now(), baked: keepColor, glossy: false },
-      { positions: m.positions, index: m.index, colors: keepColor ? m.colors : null },
-    );
+    const meta = { id: newId(), name: m.name, baseId: GLB_BASE.id, createdAt: Date.now(), baked: keepColor, glossy: false };
+    if (keepColor && m.textured) {
+      // Keep the original texture at full resolution instead of baking it into blurry vertex colors.
+      await mountMesh(meta, { positions: m.textured.positions, index: m.textured.index, colors: null, uvs: m.textured.uvs, texture: m.textured.texture });
+    } else {
+      await mountMesh(meta, { positions: m.positions, index: m.index, colors: keepColor ? m.colors : null });
+    }
     go(keepColor ? 'paint' : 'sculpt');
     toast(`📦 「${m.name || 'GLB 모형'}」을 불러왔어요. ${keepColor ? '색칠하거나 다시 빚어 보세요' : '마음껏 빚어 보세요'}!`, 3000);
   } catch (e) {
@@ -360,19 +407,109 @@ function layoutBgWorks() {
     }
     if (!best) continue;
     placed.push({ ...best, s });
-    const b = el('button', 'bgwork');
-    b.type = 'button';
-    b.style.cssText = `left:${best.x}px;top:${best.y}px;width:${s}px;height:${s}px;--rot:${(Math.random() * 24 - 12).toFixed(1)}deg;--dur:${(7 + Math.random() * 6).toFixed(1)}s;--delay:${(-Math.random() * 8).toFixed(1)}s;--dx:${(Math.random() * 16 - 8).toFixed(0)}px;--dy:${(-8 - Math.random() * 14).toFixed(0)}px`;
-    const img = el('img');
-    img.alt = w.name;
-    img.src = thumbUrl(w);
-    const label = el('span');
-    label.textContent = `${findBase(w.baseId).emoji} ${w.name} · ${w.author}`;
-    b.append(img, label);
-    b.title = `${w.name} — ${w.author}`;
-    b.addEventListener('click', () => void openPublic(w));
-    layer.append(b);
+    layer.append(makeFloater(w, best.x, best.y, s));
   }
+}
+
+/** A saved work standing loose on the landing page: grab it to move it around, click it to open it. */
+function makeFloater(w: PublicWork, x: number, y: number, s: number) {
+  const f = el('div', 'bgwork');
+  f.style.cssText = `left:${x}px;top:${y}px;width:${s}px;height:${s}px;--rot:${(Math.random() * 16 - 8).toFixed(1)}deg;--dur:${(7 + Math.random() * 6).toFixed(1)}s;--delay:${(-Math.random() * 8).toFixed(1)}s;--dx:${(Math.random() * 16 - 8).toFixed(0)}px;--dy:${(-8 - Math.random() * 14).toFixed(0)}px`;
+  const img = el('img');
+  img.alt = w.name;
+  img.draggable = false;
+  const label = el('span');
+  label.textContent = `${findBase(w.baseId).emoji} ${w.name} · ${w.author}`;
+  f.append(img, label);
+
+  // Only the model's own pixels are grabbable, not the transparent box around it.
+  let alpha: { data: Uint8ClampedArray; n: number } | null = null;
+  img.addEventListener('load', () => {
+    const n = 64, c = document.createElement('canvas');
+    c.width = c.height = n;
+    const ctx = c.getContext('2d', { willReadFrequently: true })!;
+    ctx.drawImage(img, 0, 0, n, n);
+    alpha = { data: ctx.getImageData(0, 0, n, n).data, n };
+    f.classList.add('ready');
+  });
+  floaterSrc(w).then((src) => { img.src = src; }, () => f.remove());
+  const solid = (e: PointerEvent) => {
+    if (!alpha) return false;
+    const r = f.getBoundingClientRect();
+    const px = Math.floor(((e.clientX - r.left) / r.width) * alpha.n), py = Math.floor(((e.clientY - r.top) / r.height) * alpha.n);
+    if (px < 0 || py < 0 || px >= alpha.n || py >= alpha.n) return false;
+    return alpha.data[(py * alpha.n + px) * 4 + 3] > 24;
+  };
+
+  let drag: { id: number; sx: number; sy: number; ox: number; oy: number; moved: boolean } | null = null;
+  f.addEventListener('pointermove', (e) => { if (!drag) f.classList.toggle('hot', solid(e)); });
+  f.addEventListener('pointerleave', () => { if (!drag) f.classList.remove('hot'); });
+  const move = (e: PointerEvent) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.sx, dy = e.clientY - drag.sy;
+    if (Math.hypot(dx, dy) > 4) drag.moved = true;
+    f.style.left = `${drag.ox + dx}px`;
+    f.style.top = `${drag.oy + dy}px`;
+  };
+  const drop = (e: PointerEvent) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const clicked = !drag.moved && e.type === 'pointerup';
+    drag = null;
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', drop);
+    window.removeEventListener('pointercancel', drop);
+    f.classList.remove('grabbed');
+    if (clicked) void openPublic(w);
+  };
+  f.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || !solid(e)) return;
+    e.preventDefault();
+    drag = { id: e.pointerId, sx: e.clientX, sy: e.clientY, ox: f.offsetLeft, oy: f.offsetTop, moved: false };
+    f.classList.add('grabbed', 'hot');
+    f.parentElement?.append(f); // bring to front
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', drop);
+    window.addEventListener('pointercancel', drop);
+  });
+  return f;
+}
+
+// Cutout image per public work. Works saved before cutouts existed have a JPEG photo on the potter's
+// wheel; those get re-rendered from their mesh, one at a time, and cached for the session.
+const floaterSrcs = new Map<string, Promise<string>>();
+let cutoutQueue: Promise<unknown> = Promise.resolve();
+function floaterSrc(w: PublicWork): Promise<string> {
+  const key = `${w.id}@${w.updatedAt}`;
+  let p = floaterSrcs.get(key);
+  if (!p) {
+    p = (async () => {
+      const res = await fetch(thumbUrl(w));
+      if (!res.ok) throw new Error(res.statusText);
+      const blob = await res.blob();
+      if (blob.type !== 'image/jpeg') return URL.createObjectURL(blob);
+      const job = cutoutQueue.then(async () => cutoutOf(w, await loadPublicMesh(w)));
+      cutoutQueue = job.catch(() => {});
+      return job;
+    })();
+    p.catch(() => floaterSrcs.delete(key));
+    floaterSrcs.set(key, p);
+  }
+  return p;
+}
+
+/** Legacy works only (plain vertex colors, no texture). */
+function cutoutOf(meta: { baked: boolean; glossy: boolean }, m: MeshData): string {
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(m.positions, 3));
+  g.setIndex(new THREE.BufferAttribute(m.index, 1));
+  if (meta.baked && m.colors) g.setAttribute('color', new THREE.BufferAttribute(m.colors, m.colors.length / (m.positions.length / 3)));
+  g.computeVertexNormals();
+  const mat = makeClayMaterial();
+  if (meta.baked && m.colors) applyFiredLook(mat, meta.glossy);
+  const url = studio.cutout(new THREE.Mesh(g, mat), 256);
+  g.dispose();
+  mat.dispose();
+  return url;
 }
 {
   let t = 0;
@@ -385,15 +522,61 @@ async function openPublic(w: PublicWork) {
   try {
     const mesh = await loadPublicMesh(w);
     // A fresh id: saving makes your own copy instead of touching the original.
-    mountMesh({ id: newId(), name: w.name, baseId: w.baseId, createdAt: Date.now(), baked: w.baked, glossy: w.glossy }, mesh);
-    go(w.baked ? 'done' : 'sculpt');
-    toast(`${w.author}님의 「${w.name}」이에요. 다시 색칠하거나 이어서 빚어 볼 수 있어요`, 3200);
+    await mountMesh({ id: newId(), name: w.name, baseId: w.baseId, createdAt: Date.now(), baked: w.baked, glossy: w.glossy }, mesh);
+    openView(w.name, `${w.author}님의 작품`);
   } catch (e) {
     console.error(e);
     toast('작품을 불러오지 못했어요');
   } finally {
     hideBusy();
   }
+}
+
+// ---------------------------------------------------------------- view panel: a finished work opens for looking; 손보기 unfolds the edits
+const viewTitle = el('h2');
+const fixList = el('div', 'fix-list');
+const fixBtn = button('✏️ 손보기', 'primary', () => setFixOpen(!fixList.classList.contains('open')));
+function setFixOpen(open: boolean) {
+  fixList.classList.toggle('open', open);
+  fixBtn.textContent = open ? '✏️ 손보기 접기' : '✏️ 손보기';
+}
+function fixItem(icon: string, title: string, desc: string, onClick: () => void) {
+  const b = el('button', 'fix');
+  b.type = 'button';
+  const t = el('span');
+  t.append(el('b', '', title), el('small', '', desc));
+  b.append(el('span', 'ico', icon), t);
+  b.addEventListener('click', onClick);
+  b.style.setProperty('--i', String(fixList.children.length));
+  fixList.append(b);
+}
+function openView(name: string, by: string) {
+  if (!piece) return;
+  const sub = el('small');
+  sub.textContent = by;
+  viewTitle.replaceChildren(document.createTextNode(name), sub);
+  fixList.replaceChildren();
+  if (piece.baked) {
+    fixItem('🎨', '색칠하기', '색을 덧칠하거나 지우고, 광택을 바꿔요', () => go('paint'));
+    fixItem('🖐', '다시 빚기', '모양을 고쳐요 · 칠한 색은 지워져요', unbake);
+  } else {
+    fixItem('🖐', '이어서 빚기', '당기고 누르며 모양을 다듬어요', () => go('sculpt'));
+    fixItem('🔥', '가마에 굽기', '구워서 색칠할 수 있게 만들어요', () => void startBake());
+  }
+  fixItem('🏷', '이름 바꾸고 저장', '내 작품으로 저장하거나 모두에게 공개해요', () => go('done'));
+  setFixOpen(false);
+  go('view');
+}
+{
+  const p = panels.view;
+  p.append(viewTitle, fixBtn, fixList);
+  const row = el('div', 'row');
+  row.append(
+    button('⬇ GLB', '', () => { if (piece) void exportGLB(piece.mesh, pieceName(), studio.renderer).then(() => toast('GLB 파일을 내려받았어요')).catch(() => toast('내려받기에 실패했어요')); }),
+    button('📷 사진', '', () => { if (piece) void exportPNG(studio.renderer, studio.scene, studio.camera, pieceName()).then(() => toast('사진을 저장했어요')); }),
+  );
+  p.append(row, el('div', 'spacer'));
+  p.append(button('← 첫 화면으로', '', () => { disposePiece(); go('pick'); }));
 }
 
 // ---------------------------------------------------------------- sculpt panel
@@ -523,17 +706,17 @@ let saveBtn: HTMLButtonElement;
   p.append(saveBtn);
   const row = el('div', 'row');
   row.append(
-    button('⬇ GLB 내려받기', '', () => { if (piece) void exportGLB(piece.mesh, pieceName()).then(() => toast('GLB 파일을 내려받았어요')).catch(() => toast('내려받기에 실패했어요')); }),
+    button('⬇ GLB 내려받기', '', () => { if (piece) void exportGLB(piece.mesh, pieceName(), studio.renderer).then(() => toast('GLB 파일을 내려받았어요')).catch(() => toast('내려받기에 실패했어요')); }),
     button('📷 사진 저장', '', () => { if (piece) void exportPNG(studio.renderer, studio.scene, studio.camera, pieceName()).then(() => toast('사진을 저장했어요')); }),
   );
   p.append(row);
-  turntable = toggle('🔄 턴테이블 돌리기', true, (v) => { studio.controls.autoRotate = step === 'done' && v; });
+  turntable = toggle('🔄 턴테이블 돌리기', true, (v) => { studio.controls.autoRotate = (step === 'done' || step === 'view') && v; });
   p.append(turntable.root);
 
   p.append(el('div', 'spacer'));
   const row2 = el('div', 'row');
   row2.append(
-    button('← 다시 색칠', '', () => go('paint')),
+    button('← 돌아가서 고치기', '', () => go(piece?.baked ? 'paint' : 'sculpt')),
     button('🆕 새로 만들기', '', () => { if (confirm('새 반죽을 고를까요? 저장하지 않은 작품은 사라져요.')) { disposePiece(); go('pick'); } }),
   );
   p.append(row2);
@@ -557,9 +740,11 @@ async function save() {
     positions: (g.getAttribute('position').array as Float32Array).slice(),
     index: (g.getIndex()!.array as Uint32Array).slice(),
     colors: piece.baked && colors ? (colors.array as Float32Array).slice() : null,
+    uvs: piece.texture ? (g.getAttribute('uv').array as Float32Array).slice() : null,
+    texture: piece.texture,
     baked: piece.baked,
     glossy: piece.glossy,
-    thumb: studio.snapshot(256),
+    thumb: studio.cutout(piece.mesh, 256),
   };
   const author = authorInput.value.trim();
   setAuthor(author);
@@ -577,7 +762,7 @@ async function save() {
     showBusy('🌍 모두의 작품에 올리는 중…');
     await publish({
       id: work.id, name: work.name, author, baseId: work.baseId, baked: work.baked, glossy: work.glossy, thumb: work.thumb,
-      mesh: { positions: work.positions, index: work.index, colors: work.colors },
+      mesh: { positions: work.positions, index: work.index, colors: work.colors, uvs: work.uvs, texture: work.texture },
     });
     toast(`"${work.name}" 을(를) 저장하고 모두의 작품에 올렸어요 🌍`, 2800);
   } catch (e) {
@@ -610,7 +795,7 @@ async function openGallery() {
     info.append(el('b', '', `${base.emoji} ${w.name}`), el('small', '', `${fmtDate(w.updatedAt)} · ${w.baked ? '구움' : '빚는 중'}`));
     const acts = el('div', 'acts');
     const load = el('button', '', '불러오기');
-    load.addEventListener('click', () => { loadWork(w); $('gallery').hidden = true; });
+    load.addEventListener('click', () => { void loadWork(w); $('gallery').hidden = true; });
     const del = el('button', '', '삭제');
     del.addEventListener('click', async () => {
       if (!confirm(`"${w.name}" 을(를) 삭제할까요? 모두의 작품에 공개했다면 거기서도 내려가요.`)) return;
@@ -626,24 +811,30 @@ async function openGallery() {
   }
 }
 
-function mountMesh(meta: { id: string; name: string; baseId: string; createdAt: number; baked: boolean; glossy: boolean }, m: MeshData) {
+async function mountMesh(meta: { id: string; name: string; baseId: string; createdAt: number; baked: boolean; glossy: boolean }, m: MeshData) {
+  const nV = m.positions.length / 3;
+  const textured = meta.baked && m.uvs && m.texture ? { blob: m.texture, tex: await loadTexture(m.texture) } : null;
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(m.positions.slice(), 3));
   g.setIndex(new THREE.BufferAttribute(m.index.slice(), 1));
-  if (meta.baked && m.colors) g.setAttribute('color', new THREE.BufferAttribute(m.colors.slice(), 3));
-  g.computeVertexNormals();
+  if (meta.baked && m.colors) g.setAttribute('color', new THREE.BufferAttribute(m.colors.slice(), m.colors.length / nV));
+  if (textured) {
+    g.setAttribute('uv', new THREE.BufferAttribute(m.uvs!.slice(), 2));
+    seamlessNormals(g);
+  } else {
+    g.computeVertexNormals();
+  }
   g.computeBoundingBox();
   g.computeBoundingSphere();
-  const adjacency = buildAdjacency(m.index, m.positions.length / 3);
-  mountPiece({ ...meta, geometry: g, adjacency });
+  const adjacency = buildAdjacency(m.index, nV);
+  mountPiece({ ...meta, geometry: g, adjacency, texture: textured });
   glazeToggle.set(meta.glossy);
 }
 
-function loadWork(w: Work) {
+async function loadWork(w: Work) {
   if (piece && !confirm('지금 작업 중인 작품을 닫고 불러올까요? 저장하지 않은 내용은 사라져요.')) return;
-  mountMesh(w, w);
-  go(w.baked ? 'paint' : 'sculpt');
-  toast(`"${w.name}" 을(를) 불러왔어요`);
+  await mountMesh(w, w);
+  openView(w.name, `내 작품 · ${fmtDate(w.updatedAt)}`);
 }
 
 $('btn-gallery').addEventListener('click', () => void openGallery());

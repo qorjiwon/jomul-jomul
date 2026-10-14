@@ -5,7 +5,29 @@ export const FIRED_COLOR = new THREE.Color('#c9734a');
 const GLOW = new THREE.Color('#ff5a1f');
 
 export function makeClayMaterial(): THREE.MeshStandardMaterial {
-  return new THREE.MeshStandardMaterial({ color: CLAY_COLOR.clone(), roughness: 0.95, metalness: 0 });
+  const mat = new THREE.MeshStandardMaterial({ color: CLAY_COLOR.clone(), roughness: 0.95, metalness: 0 });
+  // RGBA vertex colors are a paint layer over the texture (a = coverage), not a multiplier.
+  mat.onBeforeCompile = (shader) => {
+    shader.fragmentShader = shader.fragmentShader.replace('#include <color_fragment>', `
+      #if defined( USE_COLOR_ALPHA )
+        diffuseColor.rgb = mix( diffuseColor.rgb, vColor.rgb, vColor.a );
+      #elif defined( USE_COLOR )
+        diffuseColor.rgb *= vColor.rgb;
+      #endif`);
+  };
+  return mat;
+}
+
+/** Decodes a stored texture image (top-down, glTF convention) into a texture for the clay material. */
+export async function loadTexture(blob: Blob): Promise<THREE.Texture> {
+  const bmp = await createImageBitmap(blob, { imageOrientation: 'none' });
+  const tex = new THREE.Texture(bmp);
+  tex.flipY = false;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping; // single imported textures may tile
+  tex.anisotropy = 8;
+  tex.needsUpdate = true;
+  return tex;
 }
 
 /** Switch the material to the fired, paintable look (vertex colours on, glaze off). */
@@ -21,6 +43,8 @@ export function applyFiredLook(mat: THREE.MeshStandardMaterial, glossy: boolean)
 }
 
 export function applyClayLook(mat: THREE.MeshStandardMaterial) {
+  mat.map?.dispose();
+  mat.map = null;
   mat.vertexColors = false;
   mat.color.copy(CLAY_COLOR);
   mat.emissive.set('#000000');
