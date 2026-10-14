@@ -320,3 +320,30 @@ body.working .stage { inset: 0; }
 .btn.warn:hover { background: color-mix(in srgb, var(--danger) 88%, #000); }
 @keyframes modal-fade { from { opacity: 0; } }
 @keyframes modal-pop { from { opacity: 0; transform: translateY(10px) scale(.97); } }
+
+/* ---------- 데모 영상 · 피치덱 ---------- */
+.pitch-mini { position: absolute; right: 28px; bottom: 28px; width: 340px; z-index: 12; background: var(--card); border-radius: 20px; overflow: hidden; box-shadow: 0 16px 44px -12px rgba(39, 25, 60, .32), 0 0 0 1px var(--line); }
+.pitch-mini video { display: block; width: 100%; aspect-ratio: 16 / 10; object-fit: cover; background: var(--surface-2); cursor: zoom-in; }
+.pm-close { position: absolute; top: 8px; right: 8px; width: 26px; height: 26px; border-radius: 50%; background: rgba(20, 16, 30, .45); color: #fff; font-size: 12px; display: grid; place-items: center; }
+.pm-close:hover { background: rgba(20, 16, 30, .7); }
+.pm-body { padding: 12px 14px 14px; display: grid; gap: 2px; }
+.pm-body b { font-size: 15px; font-weight: 800; letter-spacing: -0.02em; color: var(--text); }
+.pm-body > span { font-size: 12.5px; color: var(--sub); }
+.pm-row { display: flex; gap: 6px; margin-top: 10px; }
+.pm-row .btn { flex: 1; min-height: 38px; border-radius: 12px; font-size: 13.5px; font-weight: 700; background: var(--brand-soft); color: var(--brand); justify-content: center; }
+.pm-row .btn.pm-deck { background: var(--brand); color: var(--on-brand); }
+
+.pitch-layer { position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; animation: fade .15s ease-out; }
+@keyframes fade { from { opacity: 0; } }
+.pitch-video { background: rgba(20, 16, 30, .5); backdrop-filter: blur(6px); }
+.pitch-video video { width: min(1100px, 88vw); max-height: 82vh; border-radius: 18px; box-shadow: 0 30px 80px -20px rgba(0, 0, 0, .5); background: #000; }
+.pitch-deck { background: #1a1127; }
+.pitch-x { position: absolute; top: 18px; right: 18px; width: 40px; height: 40px; border-radius: 50%; background: rgba(255, 255, 255, .14); color: #fff; font-size: 16px; display: grid; place-items: center; }
+.pitch-x:hover { background: rgba(255, 255, 255, .26); }
+.pitch-slide { position: relative; width: min(1180px, 88vw, calc(82vh * 1.415)); background: #fff; border-radius: 16px; overflow: hidden; }
+.pitch-slide img { display: block; width: 100%; aspect-ratio: 1169 / 826; }
+.pitch-nav { position: absolute; top: 50%; transform: translateY(-50%); width: 44px; height: 44px; border-radius: 50%; background: rgba(255, 255, 255, .95); color: var(--brand); font-size: 22px; box-shadow: 0 4px 14px rgba(0, 0, 0, .14); display: grid; place-items: center; }
+.pitch-nav.prev { left: 14px; } .pitch-nav.next { right: 14px; }
+.pitch-nav:disabled { opacity: 0; pointer-events: none; }
+.pitch-bar { display: flex; gap: 12px; align-items: center; color: #cfc6db; font-size: 14px; }
+.pitch-bar a { color: #fff; font-weight: 700; }

@@ -13,6 +13,7 @@ import { exportGLB, exportPNG } from './exporter';
 import { makeEditStep, EDIT_STEPS } from './aiedit';
 import { $, el, section, button, slider, toggle, toolGrid, toast, setStep, setHint, confirmModal } from './ui';
 import { colorPicker } from './colorpick';
+import { setupPitch, showPitchMini } from './pitch';
 
 type Step = 'pick' | 'view' | 'sculpt' | 'bake' | 'paint' | 'done';
 type ClayMeshObj = THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
@@ -276,6 +277,7 @@ function go(next: Step) {
   $('workbar').hidden = !working;
   refreshStepper();
   $('pick-overlay').hidden = next !== 'pick';
+  showPitchMini(next === 'pick');
   $('bake-overlay').hidden = next !== 'bake';
   studio.controls.autoRotate = (next === 'done' || next === 'view') && turntable.checked;
   cursor.visible = ghost.visible = false;
@@ -623,6 +625,12 @@ function layoutBgWorks() {
   type Box = { x: number; y: number; w: number; h: number };
   const hits = (a: Box, b: Box) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
   const placed: Box[] = [];
+  // Keep clear of the demo player floating at the bottom right.
+  const mini = $('pitch-mini');
+  if (!mini.hidden) {
+    const m = mini.getBoundingClientRect();
+    placed.push({ x: m.left - o.left, y: m.top - o.top + overlay.scrollTop, w: m.width, h: m.height });
+  }
   const edge = 14, gap = 14;
   // Start big and shrink only when the free space runs out.
   let size = Math.min(190, Math.max(100, (W - card.w) / 2 - edge * 2));
@@ -1280,4 +1288,5 @@ function frame() {
 }
 frame();
 
+setupPitch();
 go('pick');
