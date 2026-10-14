@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>조물조물 · 나만의 찰흙 친구</title>
+    <meta name="description" content="찰흙을 빚고, 가마에 굽고, 색칠해서 나만의 3D 친구를 만드는 공방" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Jua&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/src/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">🫙</span>
+        <span class="brand-name">조물조물</span>
+        <span class="brand-sub">나만의 찰흙 친구 만들기</span>
+      </div>
+      <ol class="stepper" id="stepper">
+        <li data-step="pick"><b>1</b>고르기</li>
+        <li data-step="sculpt"><b>2</b>빚기</li>
+        <li data-step="bake"><b>3</b>굽기</li>
+        <li data-step="paint"><b>4</b>색칠</li>
+        <li data-step="done"><b>5</b>완성</li>
+      </ol>
+      <div class="topbar-actions">
+        <button class="ghost" id="btn-gallery">🗂 내 작품</button>
+        <button class="ghost" id="btn-help">? 도움말</button>
+      </div>
+    </header>
+
+    <main class="stage">
+      <canvas id="view"></canvas>
+
+      <aside class="panel" id="panel-sculpt" hidden></aside>
+      <aside class="panel" id="panel-paint" hidden></aside>
+      <aside class="panel" id="panel-done" hidden></aside>
+
+      <div class="hint" id="hint"></div>
+      <div class="fps" id="fps" hidden></div>
+
+      <section class="overlay pick" id="pick-overlay">
+        <div class="bg-works" id="bg-works" aria-label="모두의 작품"></div>
+        <div class="pick-card">
+          <h1>어떤 친구를 빚어 볼까요?</h1>
+          <p>첫 반죽을 고르면, 모양은 마우스로 자유롭게 빚을 수 있어요.</p>
+
+          <form class="ai-card" id="ai-form" autocomplete="off">
+            <div class="ai-head">
+              <b>✨ AI와 첫 모형 만들기</b>
+              <span>만들고 싶은 친구를 말해 주면 AI가 첫 반죽을 빚어 줘요. 다듬고 색칠하는 건 내 몫!</span>
+            </div>
+            <div class="ai-row">
+              <input class="text" id="ai-prompt" maxlength="200" placeholder="예) 날개 달린 아기 용, 모자 쓴 펭귄" />
+              <button class="btn primary" id="ai-go" type="submit">AI에게 부탁하기</button>
+            </div>
+            <div class="ai-chips" id="ai-chips"></div>
+            <p class="ai-off" id="ai-off" hidden>지금은 AI 반죽을 쓸 수 없어요. 아래 기본 반죽으로 시작해 보세요!</p>
+          </form>
+
+          <div class="divider"><span>또는 기본 반죽 고르기</span></div>
+          <div class="base-grid" id="base-grid"></div>
+          <div class="pick-foot">
+            <label>반죽 세밀함
+              <select id="quality">
+                <option value="88">보통 (빠름)</option>
+                <option value="120" selected>세밀 (권장)</option>
+                <option value="156">아주 세밀 (느림)</option>
+              </select>
+            </label>
+            <span class="muted">세밀할수록 색칠 경계가 또렷하지만 조금 느려져요.</span>
+          </div>
+        </div>
+        <input type="file" id="glb-input" accept=".glb,model/gltf-binary" hidden />
+        <div class="dropzone" id="dropzone" hidden><div>📦 여기에 놓으면 GLB 모형을 불러와요</div></div>
+      </section>
+
+      <section class="overlay bake" id="bake-overlay" hidden>
+        <div class="kiln">
+          <div class="kiln-fire" id="kiln-fire"></div>
+          <h2 id="bake-title">가마에서 굽는 중…</h2>
+          <div class="bar"><i id="bake-bar"></i></div>
+          <p id="bake-temp">0 ℃</p>
+        </div>
+      </section>
+
+      <section class="overlay busy" id="busy-overlay" hidden>
+        <div class="busy-card"><div class="spinner"></div><p id="busy-text">반죽 준비 중…</p></div>
+      </section>
+
+      <aside class="drawer" id="gallery" hidden>
+        <header><h2>내 작품</h2><button class="icon" id="gallery-close" aria-label="닫기">✕</button></header>
+        <div class="drawer-body" id="gallery-list"></div>
+      </aside>
+
+      <section class="modal" id="help" hidden>
+        <div class="modal-card">
+          <header><h2>이렇게 만들어요</h2><button class="icon" id="help-close" aria-label="닫기">✕</button></header>
+          <div class="help-grid">
+            <div><h3>🖱 조작</h3>
+              <ul>
+                <li><b>왼쪽 드래그</b> 찰흙 위에서 빚기 / 색칠</li>
+                <li><b>오른쪽 드래그</b> 또는 빈 곳 왼쪽 드래그: 돌려보기</li>
+                <li><b>휠</b> 확대·축소 · <b>가운데 드래그</b> 이동</li>
+                <li><b>터치</b> 한 손가락 빚기, 두 손가락 돌리기·확대</li>
+              </ul></div>
+            <div><h3>⌨️ 단축키</h3>
+              <ul>
+                <li><b>[ ]</b> 붓 크기 · <b>- =</b> 세기</li>
+                <li><b>1~6</b> 도구 바꾸기 · <b>M</b> 좌우 대칭</li>
+                <li><b>Shift</b> 누른 채 드래그: 매끄럽게</li>
+                <li><b>Alt</b> 누른 채 드래그: 반대로 (당기기↔밀기)</li>
+                <li><b>⌘Z / Ctrl+Z</b> 되돌리기 · <b>⇧⌘Z</b> 다시 실행</li>
+              </ul></div>
+            <div><h3>🔥 흐름</h3>
+              <ul>
+                <li>기본 반죽을 고르고 → 마음껏 빚어요</li>
+                <li>가마에 구우면 모양이 굳고 색칠을 할 수 있어요</li>
+                <li>✨ AI에게 첫 반죽을 부탁할 수도 있어요</li>
+                <li>📂 갖고 있는 GLB 모형을 불러와 이어서 빚을 수 있어요 (끌어다 놓아도 돼요)</li>
+                <li>저장하면 첫 화면 배경에 모두의 작품으로 떠다녀요</li>
+                <li>GLB·사진으로 내려받을 수도 있어요</li>
+              </ul></div>
+          </div>
+        </div>
+      </section>
+
+      <div class="toast" id="toast" hidden></div>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

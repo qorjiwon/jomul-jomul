@@ -1,0 +1,31 @@
+{
+  "name": "jomul-jomul",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --ignore \"src/**\" --ignore \"data/**\" server/index.ts",
+    "build": "tsc --noEmit && tsc -p server --noEmit && vite build",
+    "start": "NODE_ENV=production tsx server/index.ts",
+    "preview": "pnpm build && pnpm start"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.133.0",
+    "express": "^5.3.0",
+    "idb-keyval": "^6.3.0",
+    "pg": "^8.23.1",
+    "three": "^0.186.1",
+    "tsx": "^4.23.15"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.5",
+    "@types/pg": "^8.23.1",
+    "@types/three": "^0.186.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
