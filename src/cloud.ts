@@ -1,5 +1,5 @@
 // Talks to the server: public gallery ("모두의 작품") and the AI starting lump.
-import type { Shape } from './sdf';
+import type { Prim, Shape } from './sdf';
 import { newId } from './storage';
 
 export interface PublicWork {
@@ -165,11 +165,35 @@ export async function unpublish(id: string): Promise<boolean> {
   return res.ok;
 }
 
-export async function askAiShape(prompt: string): Promise<AiShape> {
+export async function askAiShape(prompt: string, image: string | null = null): Promise<AiShape> {
   const res = await fetch('/api/ai/shape', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt }),
+    body: JSON.stringify({ prompt, image }),
+  });
+  if (!res.ok) throw await errorOf(res);
+  return res.json();
+}
+
+// Mirrors server/ai.ts EditOp: local edits the AI asks for, in the piece's own coordinates.
+type V3 = [number, number, number];
+export type EditPrim = Prim;
+export type EditOp =
+  | { op: 'add' | 'carve'; prim: EditPrim; blend: number }
+  | { op: 'move'; c: V3; r: number; offset: V3 }
+  | { op: 'scale'; c: V3; r: number; factor: number }
+  | { op: 'smooth'; c: V3; r: number; amount: number };
+
+export async function askAiEdit(body: {
+  request: string;
+  history: { request: string; reply: string }[];
+  views: { front: string; side: string };
+  bounds: { min: V3; max: V3 };
+}): Promise<{ message: string; ops: EditOp[] }> {
+  const res = await fetch('/api/ai/edit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw await errorOf(res);
   return res.json();

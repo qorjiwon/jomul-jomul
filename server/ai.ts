@@ -1,5 +1,6 @@
-// "AI와 첫 모형 만들기": ask Claude to block out a starting clay lump as SDF primitives.
-// The user still sculpts everything by hand afterwards — the AI only supplies the first lump.
+// "AI와 첫 모형 만들기": ask Claude to block out a starting clay lump as SDF primitives (from words and/or a picture).
+// "AI와 함께 고치기": ask Claude for a few local edits (add/carve/move/scale/smooth) to the piece being sculpted.
+// The user still sculpts by hand; the AI only supplies the first lump and helping hands.
 import Anthropic from '@anthropic-ai/sdk';
 
 type V3 = [number, number, number];
@@ -34,6 +35,8 @@ Primitives:
 - sphere: center, radius
 - ellipsoid: center, radii [rx, ry, rz]
 - capsule: a, b (segment end points), radius (at a), optional r2 (radius at b, for tapering limbs/ears/tails)
+
+If a reference picture is attached, block out the character IN THE PICTURE (its silhouette, proportions, distinctive parts such as ears, horns, hats, tails, wings), simplified into cute chunky clay. Use the text, if any, as extra direction.
 
 Guidelines:
 - 8–30 parts. Chunky, cute, toy-like proportions (big head, stubby limbs) that read clearly as clay.
@@ -145,17 +148,182 @@ function normalize(prims: Prim[]) {
   }
 }
 
-export async function generateShape(prompt: string): Promise<AiShape> {
+// ---------------------------------------------------------------- images
+type ImageType = 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif';
+export interface ImageInput { mediaType: ImageType; data: string }
+const MAX_IMAGE = 5 * 1024 * 1024;
+
+/** Accepts a `data:image/...;base64,` URL from the browser; null if it isn't a usable picture. */
+export function parseImage(v: unknown): ImageInput | null {
+  const m = typeof v === 'string' ? /^data:(image\/(?:jpeg|png|webp|gif));base64,([A-Za-z0-9+/=]+)$/.exec(v) : null;
+  if (!m || (m[2].length * 3) / 4 > MAX_IMAGE) return null;
+  return { mediaType: m[1] as ImageType, data: m[2] };
+}
+const imageBlock = (img: ImageInput): Anthropic.ImageBlockParam => ({ type: 'image', source: { type: 'base64', media_type: img.mediaType, data: img.data } });
+
+export async function generateShape(prompt: string, image: ImageInput | null = null): Promise<AiShape> {
   if (!client) throw new Error('AI is not configured');
+  const ask = image
+    ? `첨부한 그림 속 캐릭터를 찰흙 첫 반죽으로 만들어 주세요.${prompt ? ` 추가 설명: ${prompt}` : ''}`
+    : `만들고 싶은 친구: ${prompt}`;
   const msg = await client.messages.create({
     model,
     max_tokens: 4096,
     system: SYSTEM,
     tools: [TOOL],
     tool_choice: { type: 'tool', name: TOOL.name },
-    messages: [{ role: 'user', content: `만들고 싶은 친구: ${prompt}` }],
+    messages: [{ role: 'user', content: image ? [imageBlock(image), { type: 'text', text: ask }] : ask }],
   });
   const block = msg.content.find((b) => b.type === 'tool_use');
   if (!block || block.type !== 'tool_use') throw new Error('no tool output');
   return sanitize(block.input);
+}
+
+// ---------------------------------------------------------------- AI와 함께 고치기
+export type EditOp =
+  | { op: 'add' | 'carve'; prim: Prim; blend: number }
+  | { op: 'move'; c: V3; r: number; offset: V3 }
+  | { op: 'scale'; c: V3; r: number; factor: number }
+  | { op: 'smooth'; c: V3; r: number; amount: number };
+
+export interface AiEdit { message: string; ops: EditOp[] }
+
+export interface EditRequest {
+  request: string;
+  history: { request: string; reply: string }[];
+  views: { front: ImageInput; side: ImageInput };
+  bounds: { min: V3; max: V3 };
+}
+
+const EDIT_SYSTEM = `You are a friendly helper in a children's 3D clay-sculpting app. The child is sculpting a clay piece and asks you to change it.
+You see two pictures of the CURRENT piece and return a few local edit operations that the app applies to the clay surface. Afterwards the child keeps sculpting by hand, so rough is fine; clarity matters more than detail.
+
+Coordinate system (same units as the bounds you are given):
+- y is up, the piece stands on the floor at y = 0. The piece FACES +z. x is left/right; the piece is usually centered at x = 0.
+- Picture 1 (front): camera on +z looking toward -z. Image right = +x, image up = +y.
+- Picture 2 (side): camera on +x looking toward -x. Image LEFT = +z (the front of the piece), image up = +y.
+- Use the bounds and both pictures to place things precisely (e.g. the top of the head is near bounds.max.y).
+
+Operations (all coordinates in that system):
+- add: melt a new clay part onto the piece. type sphere(center, radius) | ellipsoid(center, radii) | capsule(a, b, radius, optional r2 = radius at b). The part MUST start inside or touching the existing clay so it attaches (e.g. a horn capsule goes from a point just under the head surface out to the tip). blend 0.02–0.1 = how softly it melts in.
+- carve: scoop clay away with a primitive (eye sockets, a mouth, a dent). Same shape fields as add.
+- move: pull the clay near center (within radius) by offset [dx,dy,dz] with soft falloff (make ears longer, bend a tail, lift an arm).
+- scale: grow (factor > 1) or shrink (factor < 1) the clay near center within radius (bigger head, thinner legs). factor 0.5–1.8.
+- smooth: soften lumps near center within radius. amount 0.1–1.
+- mirror: true also applies the op mirrored across x = 0. Use it for paired features (ears, eyes, arms, horns) and give the op the +x side.
+
+Guidelines:
+- Do what was asked and nothing else; keep the rest of the piece as it is. 1–8 ops is typical.
+- Sizes should suit the piece (compare with the bounds). No part thinner than radius 0.03.
+- message: one or two short, warm Korean sentences saying what you changed (예: "머리 위에 작은 뿔 두 개를 붙였어요!"). If the request is unclear or impossible, return no ops and ask a short question in message.`;
+
+const EDIT_TOOL: Anthropic.Tool = {
+  name: 'edit_clay',
+  description: 'Return the edits to apply to the clay piece.',
+  input_schema: {
+    type: 'object',
+    required: ['message', 'ops'],
+    properties: {
+      message: { type: 'string' },
+      ops: {
+        type: 'array',
+        items: {
+          type: 'object',
+          required: ['op'],
+          properties: {
+            op: { type: 'string', enum: ['add', 'carve', 'move', 'scale', 'smooth'] },
+            label: { type: 'string' },
+            type: { type: 'string', enum: ['sphere', 'ellipsoid', 'capsule'] },
+            center: vec, radius: { type: 'number' }, radii: vec, a: vec, b: vec, r2: { type: 'number' },
+            blend: { type: 'number' }, offset: vec, factor: { type: 'number' }, amount: { type: 'number' },
+            mirror: { type: 'boolean' },
+          },
+        },
+      },
+    },
+  },
+};
+
+const fv3 = (v: unknown, lo: number, hi: number): V3 | null =>
+  Array.isArray(v) && v.length === 3 && v.every((x) => typeof x === 'number' && Number.isFinite(x))
+    ? [num(v[0], lo, hi, 0), num(v[1], lo, hi, 0), num(v[2], lo, hi, 0)]
+    : null;
+
+function primOf(p: any): Prim | null {
+  const P = (v: unknown) => fv3(v, -6, 6);
+  if (p?.type === 'sphere') { const c = P(p.center); return c ? { t: 'sphere', c, r: num(p.radius, 0.03, 2, 0.15) } : null; }
+  if (p?.type === 'ellipsoid') {
+    const c = P(p.center), r = P(p.radii);
+    return c && r ? { t: 'ellipsoid', c, r: [num(r[0], 0.03, 2, 0.15), num(r[1], 0.03, 2, 0.15), num(r[2], 0.03, 2, 0.15)] } : null;
+  }
+  if (p?.type === 'capsule') {
+    const a = P(p.a), b = P(p.b);
+    return a && b ? { t: 'capsule', a, b, r: num(p.radius, 0.03, 1.5, 0.08), ...(p.r2 !== undefined ? { r2: num(p.r2, 0.015, 1.5, 0.08) } : {}) } : null;
+  }
+  return null;
+}
+
+const mirrorPrim = (p: Prim): Prim => {
+  const f = (v: V3): V3 => [-v[0], v[1], v[2]];
+  return p.t === 'capsule' ? { ...p, a: f(p.a), b: f(p.b) } : { ...p, c: f(p.c) } as Prim;
+};
+
+/** The op reflected across x = 0, or null when it is already centered. */
+function mirrorOp(op: EditOp): EditOp | null {
+  if ('prim' in op) {
+    const prim = mirrorPrim(op.prim);
+    return JSON.stringify(prim) === JSON.stringify(op.prim) ? null : { ...op, prim };
+  }
+  if (Math.abs(op.c[0]) <= 1e-3) return null;
+  const c: V3 = [-op.c[0], op.c[1], op.c[2]];
+  return op.op === 'move' ? { ...op, c, offset: [-op.offset[0], op.offset[1], op.offset[2]] } : { ...op, c };
+}
+
+export function sanitizeEdit(raw: any): AiEdit {
+  const ops: EditOp[] = [];
+  for (const o of Array.isArray(raw?.ops) ? raw.ops.slice(0, 16) : []) {
+    let op: EditOp | null = null;
+    if (o?.op === 'add' || o?.op === 'carve') {
+      const prim = primOf(o);
+      if (prim) op = { op: o.op, prim, blend: num(o.blend, 0.01, 0.15, 0.05) };
+    } else {
+      const c = fv3(o?.center, -6, 6);
+      const r = num(o?.radius, 0.05, 3, 0.3);
+      if (c && o?.op === 'move') { const offset = fv3(o.offset, -2, 2); if (offset) op = { op: 'move', c, r, offset }; }
+      else if (c && o?.op === 'scale') op = { op: 'scale', c, r, factor: num(o.factor, 0.4, 2, 1) };
+      else if (c && o?.op === 'smooth') op = { op: 'smooth', c, r, amount: num(o.amount, 0.05, 1, 0.5) };
+    }
+    if (!op) continue;
+    ops.push(op);
+    if (o.mirror === true) { const m = mirrorOp(op); if (m) ops.push(m); }
+  }
+  return { message: String(raw?.message ?? '').trim().slice(0, 300) || (ops.length ? '고쳐 봤어요!' : '어떻게 고칠지 조금 더 알려 줄래요?'), ops };
+}
+
+export async function editShape(req: EditRequest): Promise<AiEdit> {
+  if (!client) throw new Error('AI is not configured');
+  const f = (v: V3) => v.map((x) => x.toFixed(3)).join(', ');
+  const messages: Anthropic.MessageParam[] = [];
+  for (const h of req.history.slice(-4)) {
+    messages.push({ role: 'user', content: h.request }, { role: 'assistant', content: h.reply });
+  }
+  messages.push({
+    role: 'user',
+    content: [
+      imageBlock(req.views.front),
+      imageBlock(req.views.side),
+      { type: 'text', text: `지금 작품의 범위(bounds): min [${f(req.bounds.min)}], max [${f(req.bounds.max)}]\n부탁: ${req.request}` },
+    ],
+  });
+  const msg = await client.messages.create({
+    model,
+    max_tokens: 4096,
+    system: EDIT_SYSTEM,
+    tools: [EDIT_TOOL],
+    tool_choice: { type: 'tool', name: EDIT_TOOL.name },
+    messages,
+  });
+  const block = msg.content.find((b) => b.type === 'tool_use');
+  if (!block || block.type !== 'tool_use') throw new Error('no tool output');
+  return sanitizeEdit(block.input);
 }

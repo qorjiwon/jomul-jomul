@@ -2,6 +2,9 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
+/** Square render size for cutouts, in device px; the piece fills ~60% of it before cropping. */
+const RENDER_SIZE = 2048;
+
 export class Studio {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene = new THREE.Scene();
@@ -115,7 +118,7 @@ export class Studio {
    * Render `obj` alone (no wheel, no background) from a fixed 3/4 view and return a transparent
    * square image tightly cropped around it. The camera is restored afterwards.
    */
-  cutout(obj: THREE.Object3D, size = 256): string {
+  cutout(obj: THREE.Object3D, size = 768): string {
     const camPos = this.camera.position.clone(), target = this.controls.target.clone();
     const bg = this.scene.background;
     // Everything else that draws (wheel, rim, shadow catcher, brush rings) steps aside.
@@ -124,6 +127,12 @@ export class Studio {
     if (added) this.scene.add(obj);
     hidden.forEach((c) => { c.visible = false; });
     this.scene.background = null;
+    // Render on a fixed large square so the crop is sharp whatever the window size or pixel ratio.
+    const pixelRatio = this.renderer.getPixelRatio();
+    this.renderer.setPixelRatio(1);
+    this.renderer.setSize(RENDER_SIZE, RENDER_SIZE, false);
+    this.camera.aspect = 1;
+    this.camera.updateProjectionMatrix();
     this.fitCamera(new THREE.Box3().setFromObject(obj));
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.render(this.scene, this.camera);
@@ -149,21 +158,84 @@ export class Studio {
     const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
     const c = document.createElement('canvas');
     c.width = c.height = size;
-    c.getContext('2d')!.drawImage(probe, cx - side / 2, cy - side / 2, side, side, 0, 0, size, size);
+    const ctx = c.getContext('2d')!;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(probe, cx - side / 2, cy - side / 2, side, side, 0, 0, size, size);
 
     this.scene.background = bg;
     hidden.forEach((h) => { h.visible = true; });
     if (added) this.scene.remove(obj);
+    this.renderer.setPixelRatio(pixelRatio);
+    this.resize();
     this.camera.position.copy(camPos);
     this.controls.target.copy(target);
     this.controls.update();
     // WebP keeps transparency and stays small; browsers without a WebP encoder hand back PNG.
-    return c.toDataURL('image/webp', 0.86);
+    return c.toDataURL('image/webp', 0.95);
   }
 
   render() {
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
+  }
+
+  /**
+   * Orthographic picture of `obj` alone, from the front (+z) or the side (+x), on white, with a labelled
+   * grid in world units so a vision model can read coordinates straight off it. Returns a JPEG data URL.
+   */
+  axisView(obj: THREE.Object3D, view: 'front' | 'side', size = 640): string {
+    const box = new THREE.Box3().setFromObject(obj);
+    const center = box.getCenter(new THREE.Vector3()), dims = box.getSize(new THREE.Vector3());
+    const half = Math.max(dims.x, dims.y, dims.z) * 0.62;
+    const cam = new THREE.OrthographicCamera(-half, half, half, -half, 0.01, 100);
+    cam.position.copy(center).add(view === 'front' ? new THREE.Vector3(0, 0, 20) : new THREE.Vector3(20, 0, 0));
+    cam.lookAt(center);
+    cam.updateMatrixWorld();
+
+    const bg = this.scene.background;
+    const hidden = this.scene.children.filter((c) => c.visible && c !== obj && c instanceof THREE.Mesh);
+    hidden.forEach((c) => { c.visible = false; });
+    this.scene.background = new THREE.Color('#ffffff');
+    const pixelRatio = this.renderer.getPixelRatio();
+    this.renderer.setPixelRatio(1);
+    this.renderer.setSize(size, size, false);
+    this.renderer.render(this.scene, cam);
+
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    const ctx = c.getContext('2d')!;
+    ctx.drawImage(this.renderer.domElement, 0, 0, size, size);
+    this.scene.background = bg;
+    hidden.forEach((h) => { h.visible = true; });
+    this.renderer.setPixelRatio(pixelRatio);
+    this.resize();
+
+    // Grid: image right is +x (front) or -z (side); image up is +y.
+    const toPx = (u: number) => ((u + half) / (2 * half)) * size;
+    const raw = half / 3;
+    const mag = 10 ** Math.floor(Math.log10(raw));
+    const stepW = [1, 2, 2.5, 5, 10].map((k) => k * mag).find((k) => k >= raw)!;
+    const hc = view === 'front' ? center.x : -center.z;
+    ctx.font = '13px sans-serif';
+    ctx.lineWidth = 1;
+    for (let w = Math.ceil((hc - half) / stepW) * stepW; w <= hc + half; w += stepW) {
+      const x = toPx(w - hc);
+      ctx.strokeStyle = Math.abs(w) < 1e-6 ? 'rgba(220,40,40,.55)' : 'rgba(0,0,0,.13)';
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, size); ctx.stroke();
+      ctx.fillStyle = 'rgba(0,0,0,.6)';
+      ctx.fillText(`${view === 'front' ? 'x' : 'z'}=${+(view === 'front' ? w : -w).toFixed(3)}`, x + 3, size - 6);
+    }
+    for (let w = Math.ceil((center.y - half) / stepW) * stepW; w <= center.y + half; w += stepW) {
+      const y = size - toPx(w - center.y);
+      ctx.strokeStyle = Math.abs(w) < 1e-6 ? 'rgba(220,40,40,.55)' : 'rgba(0,0,0,.13)';
+      ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(size, y); ctx.stroke();
+      ctx.fillStyle = 'rgba(0,0,0,.6)';
+      ctx.fillText(`y=${+w.toFixed(3)}`, 4, y - 4);
+    }
+    ctx.fillStyle = 'rgba(0,0,0,.75)';
+    ctx.font = 'bold 14px sans-serif';
+    ctx.fillText(view === 'front' ? 'FRONT (camera on +z, right = +x)' : 'SIDE (camera on +x, left = +z = front)', 8, 18);
+    return c.toDataURL('image/jpeg', 0.85);
   }
 
   /** Render once and return a JPEG data URL, downscaled to `size` px on the long edge. */

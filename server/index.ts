@@ -5,7 +5,7 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { createStore, seedFeatured } from './store';
-import { aiEnabled, generateShape } from './ai';
+import { aiEnabled, editShape, generateShape, parseImage } from './ai';
 
 const prod = process.env.NODE_ENV === 'production';
 const port = Number(process.env.PORT ?? 5173);
@@ -20,7 +20,7 @@ app.set('trust proxy', true);
 
 const ID_RE = /^[a-zA-Z0-9-]{8,64}$/;
 const MAX_MESH = 16 * 1024 * 1024; // gzipped bytes
-const MAX_THUMB = 400 * 1024;
+const MAX_THUMB = 2 * 1024 * 1024;
 /** Thumbs are JPEG (older saves) or transparent WebP/PNG cutouts; tell them apart by their magic bytes. */
 const imageType = (b: Buffer) =>
   b.subarray(0, 4).toString('latin1') === '\x89PNG' ? 'image/png'
@@ -131,17 +131,46 @@ api.delete('/works/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
+/** Shared gate for AI calls: configured + per-IP and daily limits. Returns false after replying. */
+function aiGate(req: Request, res: Response): boolean {
+  if (!aiEnabled()) { res.status(503).json({ error: 'AI 기능이 아직 연결되지 않았어요.' }); return false; }
+  if (!aiPerIp(req.ip ?? '')) { res.status(429).json({ error: 'AI에게 너무 자주 부탁했어요. 몇 분 뒤에 다시 해 보세요.' }); return false; }
+  if (!aiDaily('all')) { res.status(429).json({ error: '오늘 AI 도움이 모두 소진됐어요. 내일 다시 만나요!' }); return false; }
+  return true;
+}
+
 api.post('/ai/shape', async (req, res) => {
-  if (!aiEnabled()) { res.status(503).json({ error: 'AI 기능이 아직 연결되지 않았어요.' }); return; }
   const prompt = text(req.body?.prompt, 200);
-  if (!prompt) { res.status(400).json({ error: '어떤 친구를 만들지 적어 주세요.' }); return; }
-  if (!aiPerIp(req.ip ?? '')) { res.status(429).json({ error: 'AI에게 너무 자주 부탁했어요. 몇 분 뒤에 다시 해 보세요.' }); return; }
-  if (!aiDaily('all')) { res.status(429).json({ error: '오늘 AI 반죽이 모두 소진됐어요. 내일 다시 만나요!' }); return; }
+  const image = req.body?.image ? parseImage(req.body.image) : null;
+  if (req.body?.image && !image) { res.status(400).json({ error: '그림은 5MB 이하의 JPG·PNG·WEBP만 넣을 수 있어요.' }); return; }
+  if (!prompt && !image) { res.status(400).json({ error: '어떤 친구를 만들지 적거나 그림을 넣어 주세요.' }); return; }
+  if (!aiGate(req, res)) return;
   try {
-    res.json(await generateShape(prompt));
+    res.json(await generateShape(prompt, image));
   } catch (e) {
     console.error('[jomul] ai/shape failed:', e);
     res.status(502).json({ error: 'AI가 반죽을 만들지 못했어요. 다르게 설명해 볼까요?' });
+  }
+});
+
+api.post('/ai/edit', async (req, res) => {
+  const b = req.body ?? {};
+  const request = text(b.request, 300);
+  const front = parseImage(b.views?.front), side = parseImage(b.views?.side);
+  const vec = (v: unknown) => (Array.isArray(v) && v.length === 3 && v.every((x) => typeof x === 'number' && Number.isFinite(x)) ? (v as [number, number, number]) : null);
+  const min = vec(b.bounds?.min), max = vec(b.bounds?.max);
+  if (!request) { res.status(400).json({ error: '어떻게 고칠지 적어 주세요.' }); return; }
+  if (!front || !side || !min || !max) { res.status(400).json({ error: '작품 정보를 보내지 못했어요.' }); return; }
+  const history = (Array.isArray(b.history) ? b.history : [])
+    .slice(-4)
+    .map((h: any) => ({ request: text(h?.request, 300), reply: text(h?.reply, 300) }))
+    .filter((h: { request: string; reply: string }) => h.request && h.reply);
+  if (!aiGate(req, res)) return;
+  try {
+    res.json(await editShape({ request, history, views: { front, side }, bounds: { min, max } }));
+  } catch (e) {
+    console.error('[jomul] ai/edit failed:', e);
+    res.status(502).json({ error: 'AI가 고치지 못했어요. 다르게 말해 볼까요?' });
   }
 });
 

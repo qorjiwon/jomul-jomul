@@ -3,10 +3,8 @@ import * as THREE from 'three';
 import { edgeTable, triTable } from 'three/addons/objects/MarchingCubes.js';
 import type { Bounds, SDF } from './sdf';
 
-export interface Adjacency {
-  offsets: Uint32Array; // length nV + 1
-  list: Uint32Array;
-}
+/** Neighbour lists per vertex. Plain arrays so the sculptor can grow/rewire them while splitting edges. */
+export type Adjacency = number[][];
 
 export interface ClayMesh {
   geometry: THREE.BufferGeometry;
@@ -133,36 +131,53 @@ export function signedVolume(pos: Float32Array, idx: Uint32Array): number {
   return v / 6;
 }
 
-export function buildAdjacency(idx: Uint32Array, nV: number): Adjacency {
+export function buildAdjacency(idx: Uint32Array, nV: number, count = idx.length): Adjacency {
   const sets: Set<number>[] = new Array(nV);
   for (let i = 0; i < nV; i++) sets[i] = new Set();
-  for (let t = 0; t < idx.length; t += 3) {
+  for (let t = 0; t < count; t += 3) {
     const a = idx[t], b = idx[t + 1], c = idx[t + 2];
     sets[a].add(b); sets[a].add(c);
     sets[b].add(a); sets[b].add(c);
     sets[c].add(a); sets[c].add(b);
   }
-  const offsets = new Uint32Array(nV + 1);
-  for (let i = 0; i < nV; i++) offsets[i + 1] = offsets[i] + sets[i].size;
-  const list = new Uint32Array(offsets[nV]);
-  for (let i = 0; i < nV; i++) {
-    let o = offsets[i];
-    for (const n of sets[i]) list[o++] = n;
+  return sets.map((s) => [...s]);
+}
+
+/** 1→4 midpoint subdivision: same shape, four times the triangles (denser surface for crisper paint). */
+export function subdivideMesh(positions: Float32Array, index: Uint32Array): { positions: Float32Array; index: Uint32Array } {
+  const nV = positions.length / 3;
+  const P: number[] = Array.from(positions);
+  const mids = new Map<number, number>();
+  const mid = (a: number, b: number) => {
+    const key = a < b ? a * nV + b : b * nV + a;
+    let k = mids.get(key);
+    if (k === undefined) {
+      k = P.length / 3;
+      for (let c = 0; c < 3; c++) P.push((P[a * 3 + c] + P[b * 3 + c]) / 2);
+      mids.set(key, k);
+    }
+    return k;
+  };
+  const out = new Uint32Array(index.length * 4);
+  for (let t = 0, o = 0; t < index.length; t += 3, o += 12) {
+    const a = index[t], b = index[t + 1], c = index[t + 2];
+    const ab = mid(a, b), bc = mid(b, c), ca = mid(c, a);
+    out.set([a, ab, ca, ab, b, bc, ca, bc, c, ab, bc, ca], o);
   }
-  return { offsets, list };
+  return { positions: new Float32Array(P), index: out };
 }
 
 function laplacianStep(pos: Float32Array, adj: Adjacency, factor: number, tmp: Float32Array) {
   const nV = pos.length / 3;
   for (let v = 0; v < nV; v++) {
-    const s = adj.offsets[v], e = adj.offsets[v + 1];
-    if (e === s) { tmp[v * 3] = pos[v * 3]; tmp[v * 3 + 1] = pos[v * 3 + 1]; tmp[v * 3 + 2] = pos[v * 3 + 2]; continue; }
+    const nb = adj[v];
+    if (nb.length === 0) { tmp[v * 3] = pos[v * 3]; tmp[v * 3 + 1] = pos[v * 3 + 1]; tmp[v * 3 + 2] = pos[v * 3 + 2]; continue; }
     let ax = 0, ay = 0, az = 0;
-    for (let o = s; o < e; o++) {
-      const n = adj.list[o] * 3;
+    for (const nn of nb) {
+      const n = nn * 3;
       ax += pos[n]; ay += pos[n + 1]; az += pos[n + 2];
     }
-    const inv = 1 / (e - s);
+    const inv = 1 / nb.length;
     ax *= inv; ay *= inv; az *= inv;
     tmp[v * 3] = pos[v * 3] + (ax - pos[v * 3]) * factor;
     tmp[v * 3 + 1] = pos[v * 3 + 1] + (ay - pos[v * 3 + 1]) * factor;

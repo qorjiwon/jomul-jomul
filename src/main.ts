@@ -2,14 +2,15 @@ import * as THREE from 'three';
 import { Studio } from './scene';
 import { BASES, GLB_BASE, findBase } from './bases';
 import { compileShape, shapeBounds, type Shape } from './sdf';
-import { buildClayMesh, buildAdjacency, type Adjacency } from './mesher';
-import { Sculptor, SCULPT_TOOLS, type SculptTool, type Hit } from './sculpt';
+import { buildClayMesh, buildAdjacency, subdivideMesh, type Adjacency } from './mesher';
+import { Sculptor, SCULPT_TOOLS, MAX_VERTS, type SculptTool, type Hit } from './sculpt';
 import { Painter, PAINT_TOOLS, PALETTE, type PaintTool } from './paint';
 import { runBake, makeClayMaterial, applyFiredLook, applyClayLook, loadTexture, FIRED_COLOR } from './bake';
 import { newId } from './storage';
 import { importGLB, makeSculptable, seamlessNormals } from './importer';
-import { askAiShape, fetchConfig, getAuthor, listPublic, loadPublicMesh, publish, setAuthor, thumbUrl, type MeshData, type PublicWork } from './cloud';
+import { askAiEdit, askAiShape, fetchConfig, getAuthor, listPublic, loadPublicMesh, publish, setAuthor, thumbUrl, type MeshData, type PublicWork } from './cloud';
 import { exportGLB, exportPNG } from './exporter';
+import { makeEditStep, EDIT_STEPS } from './aiedit';
 import { $, el, section, button, slider, toggle, toolGrid, toast, setStep, setHint } from './ui';
 
 type Step = 'pick' | 'view' | 'sculpt' | 'bake' | 'paint' | 'done';
@@ -36,7 +37,7 @@ const studio = new Studio(canvas);
 let piece: Piece | null = null;
 let step: Step = 'pick';
 
-const sculptSettings = { tool: 'pull' as SculptTool, radius: 0.24, strength: 0.5, symmetry: true };
+const sculptSettings = { tool: 'pull' as SculptTool, radius: 0.24, strength: 0.5, symmetry: true, dyntopo: true };
 const paintSettings = { tool: 'brush' as PaintTool, color: '#e2495b', radius: 0.16, opacity: 1, hardness: 0.5 };
 
 // Brush cursor rings (main + mirrored ghost)
@@ -116,10 +117,11 @@ function mountPiece(p: { id: string; name: string; baseId: string; createdAt: nu
   const mesh = new THREE.Mesh(p.geometry, mat) as ClayMeshObj;
   mesh.castShadow = mesh.receiveShadow = true;
   studio.scene.add(mesh);
-  const sculptor = new Sculptor(mesh, p.adjacency);
+  const sculptor = makeSculptor(mesh, p.adjacency);
   const textured = p.baked && p.texture ? p.texture : null;
   piece = { ...p, mesh, sculptor, painter: null, texture: textured?.blob ?? null };
   applySculptSettings();
+  updateVertStat();
   if (p.baked) {
     applyFiredLook(mat, p.glossy);
     if (textured) {
@@ -139,10 +141,49 @@ function mountPiece(p: { id: string; name: string; baseId: string; createdAt: nu
   nameInput.value = p.name;
 }
 
+function makeSculptor(mesh: THREE.Mesh, adjacency: Adjacency) {
+  const s = new Sculptor(mesh, adjacency);
+  s.onChange = (grew) => { if (grew) updateVertStat(); };
+  s.onCap = () => toast(`찰흙이 아주 세밀해졌어요 (정점 ${MAX_VERTS.toLocaleString()}개). 더는 자동으로 쪼개지 않아요.`, 3600);
+  updateVertStat();
+  return s;
+}
+
 function applySculptSettings() {
   if (!piece) return;
   const s = piece.sculptor;
-  s.tool = sculptSettings.tool; s.radius = sculptSettings.radius; s.strength = sculptSettings.strength; s.symmetry = sculptSettings.symmetry;
+  s.tool = sculptSettings.tool; s.radius = sculptSettings.radius; s.strength = sculptSettings.strength; s.symmetry = sculptSettings.symmetry; s.dyntopo = sculptSettings.dyntopo;
+}
+
+const vertStat = el('p', 'muted');
+function updateVertStat() {
+  if (!piece) { vertStat.textContent = ''; return; }
+  vertStat.textContent = `찰흙 알갱이(정점) ${piece.sculptor.vertexCount.toLocaleString()}개`;
+}
+
+/**
+ * Before firing, densify the surface (1→4 subdivision) so vertex paint has a finer grain: at ~100k+ vertices
+ * the brush edge reads as a crisp line instead of a soft blob. Cheap, and the shape is unchanged.
+ */
+function densifyForPaint() {
+  if (!piece) return;
+  const g = piece.mesh.geometry;
+  let positions = g.getAttribute('position').array as Float32Array;
+  let index = g.getIndex()!.array as Uint32Array;
+  const before = positions.length / 3;
+  for (let i = 0; i < 2 && positions.length / 3 < 90_000 && (index.length / 3) * 2 + positions.length / 3 <= 240_000; i++) {
+    ({ positions, index } = subdivideMesh(positions, index));
+  }
+  if (positions.length / 3 === before) return;
+  g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  g.setIndex(new THREE.BufferAttribute(index, 1));
+  g.computeVertexNormals();
+  g.computeBoundingBox();
+  g.computeBoundingSphere();
+  piece.adjacency = buildAdjacency(index, positions.length / 3);
+  piece.sculptor = makeSculptor(piece.mesh, piece.adjacency);
+  applySculptSettings();
+  console.info(`[jomul] densified for paint: ${before} → ${positions.length / 3} verts`);
 }
 
 function applyPaintSettings() {
@@ -268,14 +309,16 @@ async function startPiece(baseId: string) {
 }
 
 let aiBusy = false;
+let aiImage: string | null = null; // picture attached to the AI card (downscaled JPEG data URL)
+
 async function startAiPiece(prompt: string) {
   prompt = prompt.trim();
-  if (!prompt) { toast('어떤 친구를 만들고 싶은지 적어 주세요'); ($('ai-prompt') as HTMLInputElement).focus(); return; }
+  if (!prompt && !aiImage) { toast('어떤 친구를 만들고 싶은지 적거나 이미지를 넣어 주세요'); ($('ai-prompt') as HTMLInputElement).focus(); return; }
   if (aiBusy) return;
   aiBusy = true;
-  showBusy('✨ AI가 첫 반죽을 빚는 중… (10~30초)');
+  showBusy(aiImage ? '✨ AI가 그림을 보고 첫 반죽을 빚는 중… (10~30초)' : '✨ AI가 첫 반죽을 빚는 중… (10~30초)');
   try {
-    const ai = await askAiShape(prompt);
+    const ai = await askAiShape(prompt, aiImage);
     await buildLump('ai', ai.shape, ai.name, `${ai.emoji} ${ai.name} 반죽을 다지는 중…`);
     toast(`${ai.emoji} AI가 「${ai.name}」 첫 반죽을 빚었어요. 이제 직접 다듬어 보세요!`, 3600);
   } catch (e) {
@@ -288,6 +331,7 @@ async function startAiPiece(prompt: string) {
 
 async function startBake() {
   if (!piece || piece.baked) return;
+  densifyForPaint();
   go('bake');
   const bar = $('bake-bar');
   const temp = $('bake-temp');
@@ -366,17 +410,52 @@ function unbake() {
   const form = $('ai-form') as HTMLFormElement;
   const input = $('ai-prompt') as HTMLInputElement;
   form.addEventListener('submit', (e) => { e.preventDefault(); void startAiPiece(input.value); });
-  const chips = $('ai-chips');
-  for (const idea of ['날개 달린 아기 용', '모자 쓴 펭귄', '귀가 큰 사막여우', '뿔이 하나인 유니콘', '통통한 눈사람', '우주복 입은 아이']) {
-    const b = el('button', '', idea);
-    b.type = 'button';
-    b.addEventListener('click', () => { input.value = idea; void startAiPiece(idea); });
-    chips.append(b);
-  }
   void fetchConfig().then((c) => {
     form.classList.toggle('off', !c.ai);
     $('ai-off').hidden = c.ai;
   });
+
+  const file = $('ai-file') as HTMLInputElement;
+  const plus = $('ai-plus');
+  const menu = $('ai-menu');
+  const setMenu = (open: boolean) => { menu.hidden = !open; plus.setAttribute('aria-expanded', String(open)); };
+  plus.addEventListener('click', (e) => { e.stopPropagation(); setMenu(menu.hidden !== false); });
+  document.addEventListener('click', () => setMenu(false));
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setMenu(false); });
+  $('ai-attach').addEventListener('click', () => { setMenu(false); file.click(); });
+  file.addEventListener('change', () => { const f = file.files?.[0]; file.value = ''; if (f) void attachAiImage(f); });
+  $('ai-image-clear').addEventListener('click', () => setAiImage(null));
+}
+
+/** Pictures can be any size; the AI only needs ~1024px, and a JPEG keeps the request small. */
+async function shrinkImage(f: File, max = 1024): Promise<string> {
+  const bmp = await createImageBitmap(f);
+  const k = Math.min(1, max / Math.max(bmp.width, bmp.height));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(bmp.width * k));
+  c.height = Math.max(1, Math.round(bmp.height * k));
+  const ctx = c.getContext('2d')!;
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.drawImage(bmp, 0, 0, c.width, c.height);
+  bmp.close();
+  return c.toDataURL('image/jpeg', 0.86);
+}
+
+async function attachAiImage(f: File) {
+  if (!f.type.startsWith('image/')) { toast('그림 파일만 넣을 수 있어요'); return; }
+  try {
+    setAiImage(await shrinkImage(f));
+    ($('ai-prompt') as HTMLInputElement).focus();
+  } catch {
+    toast('그림을 읽지 못했어요. JPG나 PNG로 다시 넣어 볼까요?', 3000);
+  }
+}
+
+function setAiImage(url: string | null) {
+  aiImage = url;
+  $('ai-image').hidden = !url;
+  if (url) ($('ai-image-img') as HTMLImageElement).src = url;
 }
 
 // ---------------------------------------------------------------- GLB import
@@ -417,7 +496,8 @@ async function startGlb(file: File) {
     e.preventDefault();
     depth = 0; zone.hidden = true;
     const f = e.dataTransfer?.files?.[0];
-    if (f) void startGlb(f);
+    if (f && step === 'pick' && f.type.startsWith('image/')) void attachAiImage(f);
+    else if (f) void startGlb(f);
   });
 }
 
@@ -454,11 +534,6 @@ function layoutBgWorks() {
   if (r > maxR) { s = Math.max(96, Math.floor((maxR * 2 * Math.PI) / (n * 1.08))); r = (W - s) / 2 - 24; }
   const cx = W / 2, cy = top + r + s / 2;
   layer.style.height = `${cy + r + s / 2 + 64}px`;
-  if (n > 1) {
-    const label = el('div', 'bgring-label', `모두의 작품<b>${n}</b>`);
-    label.style.cssText = `left:${cx}px;top:${cy}px`;
-    layer.append(label);
-  }
   bgWorks.forEach((w, i) => {
     const a = -Math.PI / 2 + (i / n) * Math.PI * 2;
     layer.append(makeFloater(w, cx + Math.cos(a) * r - s / 2, cy + Math.sin(a) * r - s / 2, s));
@@ -473,7 +548,7 @@ function makeFloater(w: PublicWork, x: number, y: number, s: number) {
   img.alt = w.name;
   img.draggable = false;
   const label = el('span');
-  label.textContent = `${findBase(w.baseId).emoji} ${w.name} · ${w.author}`;
+  label.textContent = w.name;
   f.append(img, label);
 
   // Only the model's own pixels are grabbable, not the transparent box around it.
@@ -528,8 +603,9 @@ function makeFloater(w: PublicWork, x: number, y: number, s: number) {
   return f;
 }
 
-// Cutout image per public work. Works saved before cutouts existed have a JPEG photo on the potter's
-// wheel; those get re-rendered from their mesh, one at a time, and cached for the session.
+// Cutout image per public work. Works saved before sharp cutouts existed have a JPEG photo on the
+// potter's wheel or a small cutout; those get re-rendered from their mesh, one at a time, and cached for the session.
+const CUTOUT_SIZE = 768;
 const floaterSrcs = new Map<string, Promise<string>>();
 let cutoutQueue: Promise<unknown> = Promise.resolve();
 function floaterSrc(w: PublicWork): Promise<string> {
@@ -540,7 +616,7 @@ function floaterSrc(w: PublicWork): Promise<string> {
       const res = await fetch(thumbUrl(w));
       if (!res.ok) throw new Error(res.statusText);
       const blob = await res.blob();
-      if (blob.type !== 'image/jpeg') return URL.createObjectURL(blob);
+      if (blob.type !== 'image/jpeg' && (await imageWidth(blob)) >= CUTOUT_SIZE) return URL.createObjectURL(blob);
       const job = cutoutQueue.then(async () => cutoutOf(w, await loadPublicMesh(w)));
       cutoutQueue = job.catch(() => {});
       return job;
@@ -551,18 +627,39 @@ function floaterSrc(w: PublicWork): Promise<string> {
   return p;
 }
 
-/** Legacy works only (plain vertex colors, no texture). */
-function cutoutOf(meta: { baked: boolean; glossy: boolean }, m: MeshData): string {
+async function imageWidth(blob: Blob): Promise<number> {
+  try {
+    const bmp = await createImageBitmap(blob);
+    const w = bmp.width;
+    bmp.close();
+    return w;
+  } catch {
+    return 0;
+  }
+}
+
+/** Render a saved work the way mountPiece would show it: clay, fired colors, or texture plus paint layer. */
+async function cutoutOf(meta: { baked: boolean; glossy: boolean }, m: MeshData): Promise<string> {
+  const nV = m.positions.length / 3;
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.BufferAttribute(m.positions, 3));
   g.setIndex(new THREE.BufferAttribute(m.index, 1));
-  if (meta.baked && m.colors) g.setAttribute('color', new THREE.BufferAttribute(m.colors, m.colors.length / (m.positions.length / 3)));
-  g.computeVertexNormals();
+  if (meta.baked && m.colors) g.setAttribute('color', new THREE.BufferAttribute(m.colors, m.colors.length / nV));
+  const tex = meta.baked && m.uvs && m.texture ? await loadTexture(m.texture) : null;
+  if (tex) {
+    g.setAttribute('uv', new THREE.BufferAttribute(m.uvs!, 2));
+    if (g.getAttribute('color')?.itemSize !== 4) g.setAttribute('color', new THREE.BufferAttribute(new Float32Array(nV * 4), 4));
+    seamlessNormals(g);
+  } else {
+    g.computeVertexNormals();
+  }
   const mat = makeClayMaterial();
-  if (meta.baked && m.colors) applyFiredLook(mat, meta.glossy);
-  const url = studio.cutout(new THREE.Mesh(g, mat), 256);
+  if (meta.baked && (m.colors || tex)) applyFiredLook(mat, meta.glossy);
+  if (tex) mat.map = tex;
+  const url = studio.cutout(new THREE.Mesh(g, mat), CUTOUT_SIZE);
   g.dispose();
   mat.dispose();
+  tex?.dispose();
   return url;
 }
 {
@@ -615,6 +712,7 @@ function openView(name: string, by: string) {
     fixItem('🖐', '다시 빚기', '모양을 고쳐요 · 칠한 색은 지워져요', unbake);
   } else {
     fixItem('🖐', '이어서 빚기', '당기고 누르며 모양을 다듬어요', () => go('sculpt'));
+    fixItem('✨', 'AI와 함께 고치기', '말로 부탁하면 AI가 같이 고쳐 줘요', () => { go('sculpt'); aiEdit.focus(); });
     fixItem('🔥', '가마에 굽기', '구워서 색칠할 수 있게 만들어요', () => void startBake());
   }
   fixItem('🏷', '이름 바꾸고 저장', '저장하면 첫 화면에 모두의 작품으로 올라가요', () => go('done'));
@@ -631,6 +729,95 @@ function openView(name: string, by: string) {
   d.right.append(el('h2', '', '감상<small>드래그해서 이리저리 돌려 보세요.</small>'), s);
   fillBar(d, button('← 첫 화면으로', 'back', () => { disposePiece(); go('pick'); }));
 }
+
+// ---------------------------------------------------------------- AI와 함께 고치기 (sculpt step): ask in words, the AI edits the clay
+const aiEdit = (() => {
+  const root = section('✨ AI와 함께 고치기');
+  root.classList.add('ai-edit');
+  const log = el('div', 'ai-log');
+  const form = el('form', 'ai-edit-form');
+  const input = el('textarea', 'text');
+  input.rows = 2;
+  input.maxLength = 300;
+  input.placeholder = '예) 머리에 작은 뿔 두 개 달아 줘';
+  const send = button('부탁하기', 'primary', () => {});
+  send.type = 'submit';
+  form.append(input, send);
+  const chips = el('div', 'ai-chips');
+  for (const idea of ['귀를 더 길게', '머리에 뿔 두 개', '꼬리를 위로 올려 줘', '눈 자리를 살짝 파 줘', '배를 더 통통하게']) {
+    const b = el('button', '', idea);
+    b.type = 'button';
+    b.addEventListener('click', () => void ask(idea));
+    chips.append(b);
+  }
+  const off = el('p', 'muted', '지금은 AI를 쓸 수 없어요.');
+  off.hidden = true;
+  root.append(log, form, chips, off);
+
+  // A short conversation per piece, so "조금 더 길게" can refer to the last change.
+  let chat = { pieceId: '', turns: [] as { request: string; reply: string }[] };
+  let busy = false;
+  const sync = () => { if (piece && chat.pieceId !== piece.id) { chat = { pieceId: piece.id, turns: [] }; log.replaceChildren(); } };
+  const bubble = (cls: string, text: string) => {
+    const b = el('div', `ai-bubble ${cls}`);
+    b.textContent = text;
+    log.append(b);
+    log.scrollTop = log.scrollHeight;
+    return b;
+  };
+
+  async function ask(request: string) {
+    request = request.trim();
+    if (!piece || piece.baked || busy) return;
+    if (!request) { input.focus(); return; }
+    busy = true;
+    send.disabled = input.disabled = true;
+    root.classList.add('busy');
+    sync();
+    bubble('me', request);
+    const reply = bubble('ai pending', 'AI가 작품을 살펴보는 중…');
+    input.value = '';
+    try {
+      const g = piece.mesh.geometry;
+      g.computeBoundingBox();
+      const box = g.boundingBox!;
+      const res = await askAiEdit({
+        request,
+        history: chat.turns,
+        views: { front: studio.axisView(piece.mesh, 'front'), side: studio.axisView(piece.mesh, 'side') },
+        bounds: { min: box.min.toArray(), max: box.max.toArray() },
+      });
+      reply.classList.remove('pending');
+      reply.textContent = res.message;
+      chat.turns.push({ request, reply: res.message });
+      if (chat.turns.length > 4) chat.turns.shift();
+      if (res.ops.length && piece && !piece.baked) {
+        const run = makeEditStep(res.ops);
+        const geo = piece.mesh.geometry;
+        piece.sculptor.applyProgrammatic(EDIT_STEPS, (ctx, i) => {
+          const index = geo.getIndex()!;
+          run({ ...ctx, idx: index.array as Uint32Array, icount: Math.min(index.count, geo.drawRange.count) }, i);
+        });
+        refreshHistoryButtons();
+        toast('AI가 고쳤어요 · 마음에 안 들면 ↶ (⌘Z)로 되돌려요', 2800);
+      }
+    } catch (e) {
+      reply.classList.remove('pending');
+      reply.classList.add('err');
+      reply.textContent = e instanceof Error ? e.message : 'AI가 고치지 못했어요';
+    } finally {
+      busy = false;
+      send.disabled = input.disabled = false;
+      root.classList.remove('busy');
+      input.focus();
+    }
+  }
+
+  form.addEventListener('submit', (e) => { e.preventDefault(); void ask(input.value); });
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); void ask(input.value); } });
+  void fetchConfig().then((c) => { off.hidden = c.ai; form.hidden = chips.hidden = !c.ai; });
+  return { root, focus: () => { sync(); setDockOpen('right', true); input.focus(); } };
+})();
 
 // ---------------------------------------------------------------- sculpt panel
 let sculptSliders: { rad: ReturnType<typeof slider>; str: ReturnType<typeof slider> };
@@ -659,7 +846,11 @@ sculptUndo.title = '되돌리기 (⌘Z)'; sculptRedo.title = '다시 실행 (⇧
   s2.append(rad.root, str.root);
   sculptSliders = { rad, str };
   d.right.append(el('h2', '', '붓 설정<small>[ ] 붓 크기 · - = 세기</small>'), s2);
+  const dyn = toggle('🧩 늘리면 저절로 세밀해지기', true, (v) => { sculptSettings.dyntopo = v; applySculptSettings(); });
+  dyn.root.title = '찰흙을 크게 당겨도 표면이 거칠어지지 않게, 늘어난 부분에 알갱이를 더해요';
+  d.right.append(dyn.root, vertStat);
   d.right.append(button('처음 모양으로 되돌리기', '', () => { if (piece && confirm('빚은 내용을 모두 지우고 처음 반죽으로 돌아갈까요?')) { piece.sculptor.resetToOriginal(); refreshHistoryButtons(); } }));
+  d.right.append(aiEdit.root);
 
   fillBar(d,
     button('← 다른 반죽 고르기', 'back', () => { if (!piece || confirm('지금 빚은 반죽을 버리고 새로 고를까요? (저장하지 않으면 사라져요)')) { disposePiece(); go('pick'); } }),
@@ -785,7 +976,7 @@ async function save() {
   try {
     // No accounts: a saved work goes straight to the server and shows up for everyone on the first screen.
     await publish({
-      id: piece.id, name, author, baseId: piece.baseId, baked: piece.baked, glossy: piece.glossy, thumb: studio.cutout(piece.mesh, 256),
+      id: piece.id, name, author, baseId: piece.baseId, baked: piece.baked, glossy: piece.glossy, thumb: studio.cutout(piece.mesh),
       mesh: {
         positions: g.getAttribute('position').array as Float32Array,
         index: g.getIndex()!.array as Uint32Array,
@@ -951,6 +1142,7 @@ const ro = new ResizeObserver(() => studio.resize());
 ro.observe(canvas);
 
 const debug = location.search.includes('debug');
+if (debug) Object.defineProperty(window, '__jomul', { get: () => ({ piece, step }) });
 const fpsEl = $('fps');
 fpsEl.hidden = !debug;
 let frameCount = 0, frameAcc = 0, lastStat = performance.now(), maxFrame = 0;
