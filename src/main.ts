@@ -11,7 +11,8 @@ import { importGLB, makeSculptable, seamlessNormals } from './importer';
 import { askAiEdit, askAiShape, fetchConfig, getAuthor, listPublic, loadPublicMesh, publish, setAuthor, thumbUrl, type MeshData, type PublicWork } from './cloud';
 import { exportGLB, exportPNG } from './exporter';
 import { makeEditStep, EDIT_STEPS } from './aiedit';
-import { $, el, section, button, slider, toggle, toolGrid, toast, setStep, setHint } from './ui';
+import { $, el, section, button, slider, toggle, toolGrid, toast, setStep, setHint, confirmModal } from './ui';
+import { colorPicker } from './colorpick';
 
 type Step = 'pick' | 'view' | 'sculpt' | 'bake' | 'paint' | 'done';
 type ClayMeshObj = THREE.Mesh<THREE.BufferGeometry, THREE.MeshStandardMaterial>;
@@ -138,7 +139,7 @@ function mountPiece(p: { id: string; name: string; baseId: string; createdAt: nu
   }
   studio.fitCamera(p.geometry.boundingBox!);
   refreshHistoryButtons();
-  nameInput.value = p.name;
+  nameInput.value = p.name || defaultName(p.baseId);
 }
 
 function makeSculptor(mesh: THREE.Mesh, adjacency: Adjacency) {
@@ -242,11 +243,11 @@ const docks: Partial<Record<Step, Dock>> = { view: makeDock(), sculpt: makeDock(
 setDockOpen('left', true);
 setDockOpen('right', true);
 
-/** Bottom bar: back on the left, save and/or next on the right. */
-function fillBar(d: Dock, back: HTMLButtonElement, ...forward: HTMLButtonElement[]) {
+/** Bottom bar: save and/or next. Going back lives in the step line at the top. */
+function fillBar(d: Dock, ...forward: HTMLButtonElement[]) {
   const right = el('div', 'actionbar-forward');
   right.append(...forward);
-  d.bar.append(back, right);
+  d.bar.append(right);
 }
 
 const saveBtns: HTMLButtonElement[] = [];
@@ -266,7 +267,14 @@ function go(next: Step) {
   step = next;
   setStep(next === 'view' ? 'done' : next);
   for (const [k, d] of Object.entries(docks)) for (const r of d.roots) r.hidden = k !== next;
-  $('stepper').hidden = next === 'pick';
+  // While making something there's no top bar, just the one line: home · steps · name.
+  const working = next !== 'pick';
+  if (document.body.classList.contains('working') !== working) {
+    document.body.classList.toggle('working', working);
+    studio.resize();
+  }
+  $('workbar').hidden = !working;
+  refreshStepper();
   $('pick-overlay').hidden = next !== 'pick';
   $('bake-overlay').hidden = next !== 'bake';
   studio.controls.autoRotate = (next === 'done' || next === 'view') && turntable.checked;
@@ -288,6 +296,75 @@ function hintForPaint() {
   const t = PAINT_TOOLS.find((x) => x.id === paintSettings.tool)!;
   setHint(`${t.icon} ${t.name}: ${t.hint}  ·  오른쪽 드래그로 돌려보기`);
 }
+
+// ---------------------------------------------------------------- step line at the top: home · steps · name
+const STEP_ORDER = ['pick', 'sculpt', 'bake', 'paint', 'done'] as const;
+type StepId = (typeof STEP_ORDER)[number];
+const STEP_LABEL: Record<StepId, string> = { pick: '고르기', sculpt: '빚기', bake: '굽기', paint: '색칠', done: '완성' };
+
+/** Earlier steps you can jump back to from here. Baking is a moment, not a place, so it's never a target. */
+function canGoBackTo(target: StepId) {
+  if (step === 'pick' || step === 'bake' || target === 'bake') return false;
+  const here = STEP_ORDER.indexOf(step === 'view' ? 'done' : step);
+  if (STEP_ORDER.indexOf(target) >= here) return false;
+  if (target === 'paint') return !!piece?.baked;
+  return true;
+}
+
+function refreshStepper() {
+  setStep(step === 'view' ? 'done' : step);
+  document.querySelectorAll<HTMLLIElement>('#stepper li').forEach((li) => {
+    const t = li.dataset.step as StepId;
+    const can = canGoBackTo(t);
+    li.classList.toggle('can', can);
+    li.tabIndex = can ? 0 : -1;
+    li.setAttribute('role', can ? 'button' : 'listitem');
+    li.title = can ? `${STEP_LABEL[t]} 단계로 돌아가기` : '';
+  });
+}
+
+async function backTo(target: StepId) {
+  if (!canGoBackTo(target)) return;
+  if (target === 'pick') {
+    const ok = await confirmModal({ icon: '🧺', title: '고르기 단계로 돌아갈까요?', body: '지금 만들던 작품은 닫혀요. 저장하지 않은 내용은 사라져요.', ok: '돌아가기', danger: true });
+    if (ok) { disposePiece(); go('pick'); }
+  } else if (target === 'sculpt') {
+    if (piece?.baked) { void unbake(); return; }
+    if (await confirmModal({ icon: '🖐', title: '빚기 단계로 돌아갈까요?', body: '지금 모양 그대로 이어서 빚을 수 있어요.', ok: '빚기로 돌아가기' })) go('sculpt');
+  } else if (target === 'paint') {
+    if (await confirmModal({ icon: '🎨', title: '색칠 단계로 돌아갈까요?', body: '칠한 색은 그대로 두고 이어서 칠할 수 있어요.', ok: '색칠로 돌아가기' })) go('paint');
+  }
+}
+
+{
+  const stepper = $('stepper');
+  stepper.addEventListener('click', (e) => {
+    const li = (e.target as HTMLElement).closest<HTMLLIElement>('li.can');
+    if (li) void backTo(li.dataset.step as StepId);
+  });
+  stepper.addEventListener('keydown', (e) => {
+    const li = (e.target as HTMLElement).closest<HTMLLIElement>('li.can');
+    if (li && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); void backTo(li.dataset.step as StepId); }
+  });
+  $('home-link').addEventListener('click', async () => {
+    // Just looking at someone's work: nothing to lose. Anything else may hold unsaved clay.
+    if (step !== 'view' && !(await confirmModal({ icon: '🏠', title: '홈으로 돌아갈까요?', body: '지금 만들던 작품은 닫혀요. 저장하지 않은 내용은 사라져요.', ok: '홈으로', danger: true }))) return;
+    disposePiece();
+    go('pick');
+  });
+}
+
+// Work name, always editable at the top right. A fresh lump gets a playful default like 「말랑한 고양이」.
+const nameInput = $('piece-name') as HTMLInputElement;
+const NAME_ADJ = ['말랑한', '졸린', '통통한', '수줍은', '용감한', '느긋한', '배고픈', '반짝이는', '꼬물꼬물', '동글동글', '심심한', '씩씩한'];
+function defaultName(baseId: string) {
+  const noun = baseId === GLB_BASE.id ? '모형' : baseId === 'ai' ? '친구' : findBase(baseId).name;
+  let name = nameInput.value;
+  for (let i = 0; i < 4 && name === nameInput.value; i++) name = `${NAME_ADJ[Math.floor(Math.random() * NAME_ADJ.length)]} ${noun}`;
+  return name;
+}
+$('name-dice').addEventListener('click', () => { if (piece) nameInput.value = defaultName(piece.baseId); });
+nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing) nameInput.blur(); });
 
 async function buildLump(baseId: string, shape: Shape, name: string, busyText: string) {
   showBusy(busyText);
@@ -372,9 +449,10 @@ function textureUnderlay(tex: THREE.Texture, g: THREE.BufferGeometry) {
   };
 }
 
-function unbake() {
+async function unbake() {
   if (!piece || !piece.baked) return;
-  if (!confirm('다시 빚으면 칠한 색이 모두 지워져요. 계속할까요?')) return;
+  if (!(await confirmModal({ icon: '🖐', title: '빚기 단계로 돌아갈까요?', body: '구운 작품을 다시 말랑한 찰흙으로 되돌려요. 칠한 색은 모두 지워져요.', ok: '빚기로 돌아가기', danger: true }))) return;
+  if (!piece?.baked) return;
   if (piece.texture) {
     // Textured meshes keep UV seams split; weld them into one clay surface before sculpting.
     const g0 = piece.mesh.geometry;
@@ -511,7 +589,7 @@ async function startGlb(file: File) {
   });
 }
 
-// ---------------------------------------------------------------- 모두의 작품: saved works standing in a circle below the landing card
+// ---------------------------------------------------------------- 모두의 작품: saved works scattered around the landing card
 const BG_MAX = 15;
 let bgWorks: PublicWork[] = [];
 
@@ -527,27 +605,43 @@ async function refreshBgWorks() {
   layoutBgWorks();
 }
 
-/** Stand the saved works in a circle below the card, like friends around a table. */
+/**
+ * Scatter the saved works over the empty parts of the first screen (beside and around the card), in random
+ * spots that miss the card and each other. No extra section below the card: nothing to scroll down to.
+ */
 function layoutBgWorks() {
   const layer = $('bg-works');
   const overlay = $('pick-overlay');
   layer.innerHTML = '';
   if (overlay.hidden || bgWorks.length === 0) return;
-  const n = bgWorks.length;
-  const W = overlay.clientWidth;
   const o = overlay.getBoundingClientRect(), c = document.querySelector('.pick-card')!.getBoundingClientRect();
-  const top = c.bottom - o.top + overlay.scrollTop + 56;
-  // Big enough that neighbours don't touch, but never wider than the page; shrink the works if it would be.
-  let s = 204;
-  const maxR = (W - s) / 2 - 24;
-  let r = n === 1 ? 0 : Math.max(170, (n * s * 1.08) / (2 * Math.PI));
-  if (r > maxR) { s = Math.max(96, Math.floor((maxR * 2 * Math.PI) / (n * 1.08))); r = (W - s) / 2 - 24; }
-  const cx = W / 2, cy = top + r + s / 2;
-  layer.style.height = `${cy + r + s / 2 + 64}px`;
-  bgWorks.forEach((w, i) => {
-    const a = -Math.PI / 2 + (i / n) * Math.PI * 2;
-    layer.append(makeFloater(w, cx + Math.cos(a) * r - s / 2, cy + Math.sin(a) * r - s / 2, s));
-  });
+  const W = overlay.clientWidth;
+  const card = { x: c.left - o.left - 20, y: c.top - o.top + overlay.scrollTop - 16, w: c.width + 40, h: c.height + 32 };
+  // The first screen, or the card's own height when it's taller: never stretch the page.
+  const H = Math.max(overlay.clientHeight, card.y + card.h);
+  layer.style.height = `${H}px`;
+  type Box = { x: number; y: number; w: number; h: number };
+  const hits = (a: Box, b: Box) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+  const placed: Box[] = [];
+  const edge = 14, gap = 14;
+  // Start big and shrink only when the free space runs out.
+  let size = Math.min(190, Math.max(100, (W - card.w) / 2 - edge * 2));
+  for (const w of bgWorks) {
+    let spot: Box | null = null;
+    while (!spot && size >= 84) {
+      for (let t = 0; t < 160 && !spot; t++) {
+        const s = Math.round(size * (0.82 + Math.random() * 0.3));
+        if (W - s - edge * 2 <= 0 || H - s - edge * 2 <= 0) continue;
+        const b = { x: edge + Math.random() * (W - s - edge * 2), y: edge + Math.random() * (H - s - edge * 2), w: s, h: s };
+        const padded = { x: b.x - gap, y: b.y - gap, w: b.w + gap * 2, h: b.h + gap * 2 };
+        if (!hits(padded, card) && !placed.some((p) => hits(padded, p))) spot = b;
+      }
+      if (!spot) size *= 0.85;
+    }
+    if (!spot) break; // no room left for more
+    placed.push(spot);
+    layer.append(makeFloater(w, spot.x, spot.y, spot.w));
+  }
 }
 
 /** A saved work standing loose on the landing page: grab it to move it around, click it to open it. */
@@ -737,22 +831,27 @@ function openView(name: string, by: string) {
   row.append(button('⬇ GLB', '', downloadGLB), button('📷 사진', '', savePhoto));
   s.append(row);
   d.right.append(el('h2', '', '감상<small>드래그해서 이리저리 돌려 보세요.</small>'), s);
-  fillBar(d, button('← 첫 화면으로', 'back', () => { disposePiece(); go('pick'); }));
 }
 
-// ---------------------------------------------------------------- AI와 함께 고치기 (sculpt step): ask in words, the AI edits the clay
+// ---------------------------------------------------------------- AI와 함께 고치기 (sculpt step): type a request in the bottom bar, the AI edits the clay
 const aiEdit = (() => {
-  const root = section('✨ AI와 함께 고치기');
-  root.classList.add('ai-edit');
-  const log = el('div', 'ai-log');
-  const form = el('form', 'ai-edit-form');
-  const input = el('textarea', 'text');
-  input.rows = 2;
+  // The input sits in the bottom action bar; the conversation and ideas float just above it.
+  const form = el('form', 'ai-bar');
+  form.autocomplete = 'off';
+  const input = el('input');
   input.maxLength = 300;
-  input.placeholder = '예) 머리에 작은 뿔 두 개 달아 줘';
-  const send = button('부탁하기', 'primary', () => {});
+  input.placeholder = 'AI에게 부탁해서 같이 고치기 · 예) 머리에 작은 뿔 두 개 달아 줘';
+  input.setAttribute('aria-label', 'AI에게 고칠 내용 부탁하기');
+  const send = el('button', 'send', '↑');
   send.type = 'submit';
-  form.append(input, send);
+  send.setAttribute('aria-label', '부탁하기');
+  form.append(el('span', 'spark', '✨'), input, send);
+  const off = el('p', 'ai-bar-off', '지금은 AI를 쓸 수 없어요. 직접 빚어 보세요!');
+  off.hidden = true;
+
+  const float = el('div', 'ai-float');
+  const log = el('div', 'ai-log');
+  log.setAttribute('aria-live', 'polite');
   const chips = el('div', 'ai-chips');
   for (const idea of ['귀를 더 길게', '머리에 뿔 두 개', '꼬리를 위로 올려 줘', '눈 자리를 살짝 파 줘', '배를 더 통통하게']) {
     const b = el('button', '', idea);
@@ -760,9 +859,7 @@ const aiEdit = (() => {
     b.addEventListener('click', () => void ask(idea));
     chips.append(b);
   }
-  const off = el('p', 'muted', '지금은 AI를 쓸 수 없어요.');
-  off.hidden = true;
-  root.append(log, form, chips, off);
+  float.append(log, chips);
 
   // A short conversation per piece, so "조금 더 길게" can refer to the last change.
   let chat = { pieceId: '', turns: [] as { request: string; reply: string }[] };
@@ -772,6 +869,7 @@ const aiEdit = (() => {
     const b = el('div', `ai-bubble ${cls}`);
     b.textContent = text;
     log.append(b);
+    while (log.children.length > 8) log.firstElementChild!.remove();
     log.scrollTop = log.scrollHeight;
     return b;
   };
@@ -781,8 +879,9 @@ const aiEdit = (() => {
     if (!piece || piece.baked || busy) return;
     if (!request) { input.focus(); return; }
     busy = true;
-    send.disabled = input.disabled = true;
-    root.classList.add('busy');
+    input.disabled = send.disabled = true;
+    form.classList.add('busy');
+    float.classList.add('busy');
     sync();
     bubble('me', request);
     const reply = bubble('ai pending', 'AI가 작품을 살펴보는 중…');
@@ -817,16 +916,19 @@ const aiEdit = (() => {
       reply.textContent = e instanceof Error ? e.message : 'AI가 고치지 못했어요';
     } finally {
       busy = false;
-      send.disabled = input.disabled = false;
-      root.classList.remove('busy');
+      input.disabled = send.disabled = false;
+      form.classList.remove('busy');
+      float.classList.remove('busy');
       input.focus();
     }
   }
 
   form.addEventListener('submit', (e) => { e.preventDefault(); void ask(input.value); });
-  input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); void ask(input.value); } });
-  void fetchConfig().then((c) => { off.hidden = c.ai; form.hidden = chips.hidden = !c.ai; });
-  return { root, focus: () => { sync(); setDockOpen('right', true); input.focus(); } };
+  // Enter that only finishes a Korean syllable shouldn't send.
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.isComposing) e.preventDefault(); });
+  // A class, not [hidden]: go() toggles [hidden] on the step's pieces.
+  void fetchConfig().then((c) => { off.hidden = c.ai; form.hidden = !c.ai; float.classList.toggle('off', !c.ai); });
+  return { form, off, float, focus: () => { sync(); input.focus(); } };
 })();
 
 // ---------------------------------------------------------------- sculpt panel
@@ -859,14 +961,20 @@ sculptUndo.title = '되돌리기 (⌘Z)'; sculptRedo.title = '다시 실행 (⇧
   const dyn = toggle('🧩 늘리면 저절로 세밀해지기', true, (v) => { sculptSettings.dyntopo = v; applySculptSettings(); });
   dyn.root.title = '찰흙을 크게 당겨도 표면이 거칠어지지 않게, 늘어난 부분에 알갱이를 더해요';
   d.right.append(dyn.root, vertStat);
-  d.right.append(button('처음 모양으로 되돌리기', '', () => { if (piece && confirm('빚은 내용을 모두 지우고 처음 반죽으로 돌아갈까요?')) { piece.sculptor.resetToOriginal(); refreshHistoryButtons(); } }));
-  d.right.append(aiEdit.root);
+  d.right.append(button('처음 모양으로 되돌리기', '', async () => {
+    if (piece && (await confirmModal({ icon: '↺', title: '처음 모양으로 되돌릴까요?', body: '빚은 내용을 모두 지우고 처음 반죽으로 돌아가요.', ok: '되돌리기', danger: true }))) {
+      piece?.sculptor.resetToOriginal();
+      refreshHistoryButtons();
+    }
+  }));
 
-  fillBar(d,
-    button('← 다른 반죽 고르기', 'back', () => { if (!piece || confirm('지금 빚은 반죽을 버리고 새로 고를까요? (저장하지 않으면 사라져요)')) { disposePiece(); go('pick'); } }),
-    saveButton(),
-    button('🔥 가마에 굽기', 'primary', () => void startBake()),
-  );
+  // Bottom bar: ask the AI in words, then save / fire.
+  d.bar.classList.add('wide');
+  d.bar.append(aiEdit.form, aiEdit.off, el('span', 'bar-sep'));
+  fillBar(d, saveButton(), button('🔥 가마에 굽기', 'primary', () => void startBake()));
+  d.roots.push(aiEdit.float);
+  aiEdit.float.hidden = true;
+  $('stage').append(aiEdit.float);
 }
 
 // ---------------------------------------------------------------- paint panel
@@ -876,14 +984,12 @@ paintUndo.title = '되돌리기 (⌘Z)'; paintRedo.title = '다시 실행 (⇧�
 let glazeToggle: ReturnType<typeof toggle>;
 let paintSliders: { rad: ReturnType<typeof slider>; op: ReturnType<typeof slider> };
 let paintToolGrid: ReturnType<typeof toolGrid<PaintTool>>;
-let colorInput: HTMLInputElement;
-let colorCode: HTMLElement;
+let picker: ReturnType<typeof colorPicker>;
 let swatches: HTMLElement[] = [];
 
-function setPaintColor(hex: string) {
+function setPaintColor(hex: string, fromPicker = false) {
   paintSettings.color = hex;
-  colorInput.value = hex;
-  colorCode.textContent = hex;
+  if (!fromPicker) picker.set(hex);
   for (const s of swatches) s.classList.toggle('active', s.dataset.c === hex);
   applyPaintSettings();
 }
@@ -907,52 +1013,42 @@ function setPaintColor(hex: string) {
   d.left.append(s3);
   paintSliders = { rad, op };
 
-  const s1 = section('색');
+  // The full color picker is always open; the swatches below are shortcuts.
+  const toBrush = () => { if (paintSettings.tool === 'eraser' || paintSettings.tool === 'picker') paintToolGrid.select('brush'); };
+  picker = colorPicker(paintSettings.color, (hex) => { setPaintColor(hex, true); toBrush(); });
+  const s1 = section('자주 쓰는 색');
   const pal = el('div', 'palette');
   for (const c of PALETTE) {
     const sw = el('div', 'swatch');
     sw.style.background = c;
     sw.dataset.c = c;
-    sw.addEventListener('click', () => { setPaintColor(c); if (paintSettings.tool === 'eraser' || paintSettings.tool === 'picker') paintToolGrid.select('brush'); });
+    sw.title = c;
+    sw.addEventListener('click', () => { setPaintColor(c); toBrush(); });
     swatches.push(sw);
     pal.append(sw);
   }
-  const cp = el('div', 'colorpick');
-  colorInput = el('input'); colorInput.type = 'color'; colorInput.value = paintSettings.color;
-  colorCode = el('code', '', paintSettings.color);
-  colorInput.addEventListener('input', () => setPaintColor(colorInput.value));
-  cp.append(colorInput, el('span', '', '직접 고르기'), colorCode);
-  s1.append(pal, cp);
-  d.right.append(el('h2', '', '물감<small>고른 색으로 칠해요.</small>'), s1);
+  s1.append(pal);
+  d.right.append(el('h2', '', '물감<small>판을 끌어서 원하는 색을 바로 골라요.</small>'), picker.root, s1);
 
   glazeToggle = toggle('✨ 유약 광택', false, (v) => { if (piece?.baked) { piece.glossy = v; applyFiredLook(piece.mesh.material, v); } });
   d.right.append(glazeToggle.root);
 
-  fillBar(d,
-    button('← 다시 빚기 (색 지워짐)', 'back', unbake),
-    saveButton(),
-    button('✨ 완성하기', 'primary', () => go('done')),
-  );
+  fillBar(d, saveButton(), button('✨ 완성하기', 'primary', () => go('done')));
   setPaintColor(paintSettings.color);
 }
 
 // ---------------------------------------------------------------- done panel
-const nameInput = el('input', 'text') as HTMLInputElement;
 const authorInput = el('input', 'text') as HTMLInputElement;
 let turntable: ReturnType<typeof toggle>;
 {
   const d = docks.done!;
-  d.left.append(el('h2', '', '완성!<small>이름을 지어 주고 저장해요.</small>'));
-  const s1 = section('작품 이름');
-  nameInput.placeholder = '예) 하품하는 고양이';
-  nameInput.maxLength = 30;
-  s1.append(nameInput);
+  d.left.append(el('h2', '', '완성!<small>저장하면 첫 화면에 모두의 작품으로 올라가요.</small>'));
   const s2 = section('만든 사람');
   authorInput.placeholder = '닉네임 (비우면 익명의 조물러)';
   authorInput.maxLength = 20;
   authorInput.value = getAuthor();
   s2.append(authorInput);
-  d.left.append(s1, s2);
+  d.left.append(s2);
 
   const s3 = section('내려받기');
   const row = el('div', 'row');
@@ -961,17 +1057,19 @@ let turntable: ReturnType<typeof toggle>;
   turntable = toggle('🔄 턴테이블 돌리기', true, (v) => { studio.controls.autoRotate = (step === 'done' || step === 'view') && v; });
   d.right.append(el('h2', '', '감상<small>돌려 보고 내려받아요.</small>'), turntable.root, s3);
   d.right.append(el('div', 'spacer'));
-  d.right.append(button('🆕 새로 만들기', '', () => { if (confirm('새 반죽을 고를까요? 저장하지 않은 작품은 사라져요.')) { disposePiece(); go('pick'); } }));
+  d.right.append(button('🆕 새로 만들기', '', async () => {
+    if (await confirmModal({ icon: '🧺', title: '새 반죽을 고를까요?', body: '저장하지 않은 작품은 사라져요.', ok: '새로 만들기', danger: true })) { disposePiece(); go('pick'); }
+  }));
 
   fillBar(d,
-    button('← 돌아가서 고치기', 'back', () => go(piece?.baked ? 'paint' : 'sculpt')),
     saveButton('💾 저장하기', 'primary'),
   );
 }
 
 function pieceName() {
   if (!piece) return '조물조물';
-  return nameInput.value.trim() || `${findBase(piece.baseId).name} 친구`;
+  if (!nameInput.value.trim()) nameInput.value = defaultName(piece.baseId);
+  return nameInput.value.trim();
 }
 
 async function save() {
@@ -1027,14 +1125,10 @@ async function mountMesh(meta: { id: string; name: string; baseId: string; creat
   glazeToggle.set(meta.glossy);
 }
 
-// The logo always leads back to the first screen; unsaved clay on the wheel asks first.
+// The logo sits in the top bar, which only shows on the first screen: it just scrolls back up.
 $('brand').addEventListener('click', (e) => {
   e.preventDefault();
-  if (step === 'pick') return;
-  const working = step === 'sculpt' || step === 'bake' || step === 'paint';
-  if (working && !confirm('첫 화면으로 갈까요? 저장하지 않은 작품은 사라져요.')) return;
-  disposePiece();
-  go('pick');
+  $('pick-overlay').scrollTo({ top: 0, behavior: 'smooth' });
 });
 
 // ---------------------------------------------------------------- history

@@ -15,15 +15,29 @@
         <span class="brand-name">조물조물</span>
         <span class="brand-sub">나만의 찰흙 친구 만들기</span>
       </a>
-      <ol class="stepper" id="stepper">
-        <li data-step="pick"><b>1</b>고르기</li>
-        <li data-step="sculpt"><b>2</b>빚기</li>
-        <li data-step="bake"><b>3</b>굽기</li>
-        <li data-step="paint"><b>4</b>색칠</li>
-        <li data-step="done"><b>5</b>완성</li>
-      </ol>
-      <div class="topbar-actions"></div>
     </header>
+
+    <!-- 만드는 중에는 위 바 대신 이 한 줄만: 홈으로 · 단계 · 작품 이름 -->
+    <div class="workbar" id="workbar" hidden>
+      <div class="workbar-left">
+        <button class="home-link" id="home-link" type="button">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+          홈으로 돌아가기
+        </button>
+      </div>
+      <ol class="stepper" id="stepper">
+        <li data-step="pick"><b>1</b><span>고르기</span></li>
+        <li data-step="sculpt"><b>2</b><span>빚기</span></li>
+        <li data-step="bake"><b>3</b><span>굽기</span></li>
+        <li data-step="paint"><b>4</b><span>색칠</span></li>
+        <li data-step="done"><b>5</b><span>완성</span></li>
+      </ol>
+      <div class="namebox">
+        <label for="piece-name">작품 이름</label>
+        <input id="piece-name" maxlength="30" placeholder="이름을 지어 주세요" autocomplete="off" spellcheck="false" />
+        <button class="name-dice" id="name-dice" type="button" title="다른 이름 뽑기" aria-label="다른 이름 뽑기">🎲</button>
+      </div>
+    </div>
 
     <main class="stage" id="stage">
       <canvas id="view"></canvas>
@@ -49,7 +63,7 @@
                   <button id="ai-attach" type="button" role="menuitem">🖼 이미지 추가</button>
                 </div>
               </div>
-              <input id="ai-prompt" maxlength="200" placeholder="이미지 첨부 또는 텍스트 입력" aria-label="만들고 싶은 친구" />
+              <input id="ai-prompt" maxlength="200" placeholder="이미지 첨부 또는 텍스트 입력 (예: 빨간 목도리를 한 눈사람)" aria-label="만들고 싶은 친구" />
             </div>
             <button class="btn primary ai-go" id="ai-go" type="submit">AI와 함께 시작하기</button>
             <input type="file" id="ai-file" accept="image/*" hidden />

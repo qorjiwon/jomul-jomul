@@ -106,6 +106,42 @@ export function setStep(step: string) {
   });
 }
 
+export interface ConfirmOpts { icon: string; title: string; body: string; ok: string; danger?: boolean }
+
+/** Our own confirm dialog (the browser's looks out of place). Resolves true on OK, false on cancel / Esc / backdrop. */
+export function confirmModal(o: ConfirmOpts): Promise<boolean> {
+  return new Promise((resolve) => {
+    const wrap = el('div', 'modal confirm');
+    const card = el('div', 'modal-card confirm-card');
+    card.setAttribute('role', 'alertdialog');
+    card.setAttribute('aria-modal', 'true');
+    const h = el('h2');
+    h.textContent = o.title;
+    const p = el('p');
+    p.textContent = o.body;
+    const row = el('div', 'row');
+    const no = button('취소', '', () => close(false));
+    const yes = button(o.ok, o.danger ? 'warn' : 'primary', () => close(true));
+    row.append(no, yes);
+    card.append(el('div', 'confirm-icon', o.icon), h, p, row);
+    wrap.append(card);
+    // Swallow keys while open so tool shortcuts don't fire behind the dialog.
+    const onKey = (e: KeyboardEvent) => {
+      e.stopPropagation();
+      if (e.key === 'Escape') close(false);
+    };
+    function close(v: boolean) {
+      wrap.remove();
+      document.removeEventListener('keydown', onKey, true);
+      resolve(v);
+    }
+    wrap.addEventListener('pointerdown', (e) => { if (e.target === wrap) close(false); });
+    document.addEventListener('keydown', onKey, true);
+    document.body.append(wrap);
+    yes.focus();
+  });
+}
+
 export function setHint(text: string) {
   $('hint').textContent = text;
 }
